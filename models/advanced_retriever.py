@@ -81,7 +81,10 @@ class Retriever(nn.Module):
         self.max_seq_len = max_seq_len
         self.mean_passage_len = mean_passage_len
         self.beam_size = beam_size
-        self.gradient_checkpointing = gradient_checkpointing
+        # Gradient checkpointing is fundamentally incompatible with multi-hop reasoning
+        # due to computational graph reuse between hops causing "backward second time" errors
+        # Alternative memory optimization: use smaller batch size, model parallelism, or mixed precision
+        self.gradient_checkpointing = False
         self.use_focal = use_focal
         self.use_early_stop = use_early_stop
         self.use_label_order = False  # Add this attribute
@@ -90,12 +93,14 @@ class Retriever(nn.Module):
         self.hop_classifier_layer = nn.Linear(config.hidden_size, 2)
         self.hop_n_classifier_layer = nn.Linear(config.hidden_size, 2)
         
-        # Enable gradient checkpointing if requested
-        if self.gradient_checkpointing:
-            self.encoder.gradient_checkpointing_enable()
+        # Note: Gradient checkpointing disabled for multi-hop compatibility
+        # Memory optimization alternatives: mixed precision, model parallelism, smaller batch sizes
         
-        # Initialize tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # Initialize tokenizer (suppress fast tokenizer warning for DeBERTa)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*sentencepiece tokenizer.*")
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         
         logger.info(f"🧠 Retriever initialized with {self.count_parameters():,} parameters")
         logger.info(f"📊 Beam size: {beam_size}, Max seq len: {max_seq_len}")
@@ -127,6 +132,26 @@ class Retriever(nn.Module):
         
         return encoded
     
+    def _hop1_forward(self, hop1_qp_ids, hop1_qp_attention_mask):
+        """Forward pass for first hop - simplified without gradient checkpointing"""
+        hop1_encoder_outputs = self.encoder(
+            input_ids=hop1_qp_ids, 
+            attention_mask=hop1_qp_attention_mask
+        )[0][:, 0, :]  # [doc_num, hidden_size]
+        
+        hop1_projection = self.hop_classifier_layer(hop1_encoder_outputs)
+        return hop1_projection
+    
+    def _hop_n_forward(self, hop_qp_ids, hop_qp_attention_mask):
+        """Forward pass for subsequent hops - simplified without gradient checkpointing"""
+        hop_encoder_outputs = self.encoder(
+            input_ids=hop_qp_ids, 
+            attention_mask=hop_qp_attention_mask
+        )[0][:, 0, :]  # [vec_num, hidden_size]
+        
+        hop_projection = self.hop_n_classifier_layer(hop_encoder_outputs)
+        return hop_projection
+
     def forward(self, q_codes, c_codes, sf_idx, hop=0):
         """
         Forward pass with multi-hop reasoning
@@ -192,18 +217,8 @@ class Retriever(nn.Module):
                 # Store question context info for next hops (simplified)
                 next_question_ids = context_ids
                 
-                # Encode first hop
-                hop1_encoder_outputs = self.encoder(
-                    input_ids=hop1_qp_ids, 
-                    attention_mask=hop1_qp_attention_mask
-                )[0][:, 0, :]  # [doc_num, hidden_size]
-                
-                if self.training and self.gradient_checkpointing:
-                    hop1_projection = torch.utils.checkpoint.checkpoint(
-                        self.hop_classifier_layer, hop1_encoder_outputs
-                    )
-                else:
-                    hop1_projection = self.hop_classifier_layer(hop1_encoder_outputs)
+                # First hop encoding (no gradient checkpointing for multi-hop compatibility)
+                hop1_projection = self._hop1_forward(hop1_qp_ids, hop1_qp_attention_mask)
                 
                 if self.training:
                     total_loss = total_loss + loss_function(hop1_projection, hop1_label)
@@ -330,20 +345,8 @@ class Retriever(nn.Module):
                 
                 assert len(pred_mapping) == hop_qp_ids.shape[0]
                 
-                # Encode current hop
-                hop_encoder_outputs = self.encoder(
-                    input_ids=hop_qp_ids, 
-                    attention_mask=hop_qp_attention_mask
-                )[0][:, 0, :]  # [vec_num, hidden_size]
-                
-                hop_projection_func = self.hop_n_classifier_layer
-                
-                if self.training and self.gradient_checkpointing:
-                    hop_projection = torch.utils.checkpoint.checkpoint(
-                        hop_projection_func, hop_encoder_outputs
-                    )
-                else:
-                    hop_projection = hop_projection_func(hop_encoder_outputs)
+                # Subsequent hop encoding (no gradient checkpointing for multi-hop compatibility)
+                hop_projection = self._hop_n_forward(hop_qp_ids, hop_qp_attention_mask)
                 
                 if self.training:
                     if not self.use_focal:
@@ -357,8 +360,10 @@ class Retriever(nn.Module):
                 current_preds = [pred_mapping[hop_pred_documents[i].item()] 
                                for i in range(self.beam_size)]
         
+        # After completing all hops, current_preds becomes final_preds
         res = {
-            'current_preds': current_preds,
+            'current_preds': current_preds,  # Keep for backward compatibility
+            'final_preds': current_preds,    # Final predictions after all hops completed
             'loss': total_loss
         }
         return res

@@ -177,18 +177,23 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
     f1_scores = []
     em_scores = []
     
+    # Calculate 30% checkpoint for reporting
+    total_batches = max_batches if max_batches else len(dataloader)
+    checkpoint_30_percent = int(total_batches * 0.3)
+    
     progress_bar = tqdm(dataloader, desc="Training")
     for batch_idx, batch in enumerate(progress_bar):
-        optimizer.zero_grad()
         
-        batch_loss = 0
-        valid_samples = 0
         batch_f1 = 0
         batch_em = 0
+        valid_samples = 0
         
-        # Process each sample in batch
+        # Process each sample in batch individually
         for i in range(len(batch['q_codes'])):
             try:
+                # Zero gradients for each sample
+                optimizer.zero_grad()
+                
                 # Move data to device efficiently
                 q_codes = [q.to(device, non_blocking=True) for q in batch['q_codes'][i]]
                 c_codes = [c.to(device, non_blocking=True) for c in batch['c_codes'][i]]
@@ -205,69 +210,71 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
                     loss = outputs['loss']
                 
                 if loss.requires_grad and not torch.isnan(loss):
-                    batch_loss += loss
-                    valid_samples += 1
+                    # Backward pass for individual sample
+                    if scaler is not None:
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        optimizer.step()
                     
-                    # Calculate F1 and EM
-                    if 'current_preds' in outputs and outputs['current_preds']:
-                        predictions = outputs['current_preds'][0][:2] if outputs['current_preds'][0] else []
-                        targets = sf_idx[0].cpu().tolist()[:2]
+                    valid_samples += 1
+                    epoch_losses.append(loss.item())
+                    
+                    # Calculate F1 and EM only after ALL hops are completed
+                    if 'final_preds' in outputs and outputs['final_preds']:
+                        # Use final predictions after all hops are completed
+                        final_predictions = outputs['final_preds'][0] if outputs['final_preds'][0] else []
+                        targets = sf_idx[0].cpu().tolist()
+                        
+                        f1, em = calculate_f1_em(final_predictions, targets)
+                        batch_f1 += f1
+                        batch_em += em
+                        f1_scores.append(f1)
+                        em_scores.append(em)
+                        
+                    elif 'current_preds' in outputs and outputs['current_preds']:
+                        # Fallback to current predictions if final not available
+                        predictions = outputs['current_preds'][0] if outputs['current_preds'][0] else []
+                        targets = sf_idx[0].cpu().tolist()
                         
                         f1, em = calculate_f1_em(predictions, targets)
                         batch_f1 += f1
                         batch_em += em
-                        
-                        # Debug info for first batch of first epoch
-                        if batch_idx == 0 and i == 0:
-                            print(f"\n🔍 Debug Info:")
-                            print(f"   Raw model output keys: {list(outputs.keys())}")
-                            print(f"   Current preds shape: {len(outputs['current_preds'])} beams")
-                            print(f"   Beam 0 predictions: {outputs['current_preds'][0]}")
-                            print(f"   Targets (supporting facts): {targets}")
-                            print(f"   Hop count: {hop}")
-                            print(f"   F1: {f1:.4f}, EM: {em:.4f}")
-                            print(f"   Why only 1 prediction? Possible reasons:")
-                            print(f"     - Beam search stopped early")
-                            print(f"     - Model confidence low for other indices") 
-                            print(f"     - Need more training to predict multiple supporting facts")
-                    else:
-                        # No predictions available
-                        if batch_idx == 0 and i == 0:
-                            print(f"\n⚠️  No predictions available from model output")
-                            print(f"   Available output keys: {list(outputs.keys()) if outputs else 'None'}")
+                        f1_scores.append(f1)
+                        em_scores.append(em)
                     
             except Exception as e:
                 print(f"Sample {i} failed: {e}")
                 continue
         
         if valid_samples > 0:
-            avg_loss = batch_loss / valid_samples
             avg_f1 = batch_f1 / valid_samples
             avg_em = batch_em / valid_samples
             
-            # Mixed precision backward pass
-            if scaler is not None:
-                scaler.scale(avg_loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                avg_loss.backward()
-                optimizer.step()
-            
-            # Clear GPU cache periodically
-            if torch.cuda.is_available() and batch_idx % 10 == 0:
-                torch.cuda.empty_cache()
-            
-            epoch_losses.append(avg_loss.item())
-            f1_scores.append(avg_f1)
-            em_scores.append(avg_em)
-            
             progress_bar.set_postfix({
-                'loss': f'{avg_loss.item():.4f}',
+                'loss': f'{epoch_losses[-1]:.4f}' if epoch_losses else '0.0000',
                 'f1': f'{avg_f1:.4f}',
                 'em': f'{avg_em:.4f}',
                 'valid': f'{valid_samples}/{len(batch["q_codes"])}'
             })
+        
+        # Clear GPU cache periodically
+        if torch.cuda.is_available() and batch_idx % 10 == 0:
+            torch.cuda.empty_cache()
+        
+        # Report metrics at 30% checkpoint
+        if batch_idx == checkpoint_30_percent and f1_scores and em_scores:
+            current_avg_f1 = sum(f1_scores) / len(f1_scores)
+            current_avg_em = sum(em_scores) / len(em_scores)
+            current_avg_loss = sum(epoch_losses) / len(epoch_losses)
+            print(f"\n📊 30% Checkpoint ({batch_idx+1}/{total_batches} batches):")
+            print(f"   Average Loss: {current_avg_loss:.4f}")
+            print(f"   Average F1: {current_avg_f1:.4f}")
+            print(f"   Average EM: {current_avg_em:.4f}")
+            print(f"   Max F1 so far: {max(f1_scores):.4f}")
+            print(f"   Max EM so far: {max(em_scores):.4f}")
         
         # Early break if max_batches specified
         if max_batches and batch_idx >= max_batches - 1:
@@ -283,7 +290,7 @@ def main():
     parser = argparse.ArgumentParser(description='Train Advanced Multi-Hop Retriever - Paper Configuration')
     # ========== PAPER CONFIGURATION (DEFAULT VALUES) ==========
     parser.add_argument('--samples', type=int, default=None, help='Number of training samples (None = FULL DATASET)')
-    parser.add_argument('--epochs', type=int, default=16, help='Number of epochs (Paper: 16)')
+    parser.add_argument('--epochs', type=int, default=2, help='Number of epochs (Paper: 16, Test: 2)')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size (Paper: 1)')
     parser.add_argument('--learning_rate', type=float, default=2e-5, help='Learning rate (Paper: 2e-5)')
     parser.add_argument('--max_len', type=int, default=512, help='Max sequence length (Paper: 512)')
@@ -292,7 +299,7 @@ def main():
     parser.add_argument('--max_batches', type=int, default=None, help='Max batches per epoch (None = FULL DATASET)')
     parser.add_argument('--gpu', action='store_true', help='Force GPU usage')
     parser.add_argument('--mixed_precision', action='store_true', default=False, help='Use mixed precision (typically False with gradient checkpointing)')
-    parser.add_argument('--gradient_checkpointing', action='store_true', default=True, help='Use gradient checkpointing for memory efficiency (recommended)')
+    parser.add_argument('--gradient_checkpointing', action='store_true', default=False, help='Use gradient checkpointing for memory efficiency (recommended)')
     
     args = parser.parse_args()
     
