@@ -60,8 +60,6 @@ class Retriever(nn.Module):
                  mean_passage_len=70,
                  beam_size=2,  # Matching your beam_width=2 requirement
                  gradient_checkpointing=False,
-                 use_label_order=False,
-                 use_negative_sampling=False,
                  use_focal=True,  # Enable focal loss by default
                  use_early_stop=True,
                  ):
@@ -84,10 +82,9 @@ class Retriever(nn.Module):
         self.mean_passage_len = mean_passage_len
         self.beam_size = beam_size
         self.gradient_checkpointing = gradient_checkpointing
-        self.use_label_order = use_label_order
-        self.use_negative_sampling = use_negative_sampling if beam_size > 1 else False
         self.use_focal = use_focal
         self.use_early_stop = use_early_stop
+        self.use_label_order = False  # Add this attribute
         
         # Classification layers for different hops
         self.hop_classifier_layer = nn.Linear(config.hidden_size, 2)
@@ -146,8 +143,8 @@ class Retriever(nn.Module):
         if self.use_focal:
             focal_loss_function = FocalLoss()
         
-        question_ids = q_codes[0]
-        context_ids = c_codes  # This should be the full list, not c_codes[0]
+        question_ids = q_codes[0]  # Reference for question length
+        context_ids = c_codes  # These are now: [CLS] + Q + C + [SEP]
         current_preds = []
         
         if self.training:
@@ -163,32 +160,26 @@ class Retriever(nn.Module):
                 'loss': total_loss
             }
         
-        mean_passage_len = (self.max_seq_len - 2 - question_ids.shape[-1]) // hops
-        
         # Multi-hop reasoning loop
         for idx in range(hops):
             if idx == 0:
-                # First hop
-                qp_len = [
-                    min(self.max_seq_len - 2 - (hops - 1 - idx) * mean_passage_len, 
-                        question_ids.shape[-1] + c.shape[-1]) 
-                    for c in context_ids
-                ]
-                next_question_ids = []
-                hop1_qp_ids = torch.zeros([len(context_ids), max(qp_len) + 2], 
+                # First hop - context_ids are already formatted as [CLS] + Q + C + [SEP]
+                max_len = max(len(c) for c in context_ids)
+                hop1_qp_ids = torch.zeros([len(context_ids), max_len], 
                                         device=device, dtype=torch.long)
-                hop1_qp_attention_mask = torch.zeros([len(context_ids), max(qp_len) + 2], 
+                hop1_qp_attention_mask = torch.zeros([len(context_ids), max_len], 
                                                    device=device, dtype=torch.long)
                 
                 if self.training:
                     hop1_label = torch.zeros([len(context_ids)], dtype=torch.long, device=device)
                 
                 for i in range(len(context_ids)):
-                    this_question_ids = torch.cat((question_ids, context_ids[i]))[:qp_len[i]]
-                    hop1_qp_ids[i, 1:qp_len[i]+1] = this_question_ids.view(-1)
-                    hop1_qp_ids[i, 0] = self.tokenizer.cls_token_id
-                    hop1_qp_ids[i, qp_len[i]+1] = self.tokenizer.sep_token_id
-                    hop1_qp_attention_mask[i, :qp_len[i]+1] = 1
+                    # Use the pre-formatted sequences directly: [CLS] + Q + C + [SEP]
+                    seq_len = len(context_ids[i])
+                    hop1_qp_ids[i, :seq_len] = context_ids[i]
+                    
+                    # Create attention mask - attend to all non-pad tokens
+                    hop1_qp_attention_mask[i, :seq_len] = (context_ids[i] != self.tokenizer.pad_token_id).long()
                     
                     if self.training:
                         if self.use_label_order:
@@ -197,8 +188,9 @@ class Retriever(nn.Module):
                         else:
                             if i in sf_idx:
                                 hop1_label[i] = 1
-                    
-                    next_question_ids.append(this_question_ids)
+                
+                # Store question context info for next hops (simplified)
+                next_question_ids = context_ids
                 
                 # Encode first hop
                 hop1_encoder_outputs = self.encoder(
@@ -247,16 +239,16 @@ class Retriever(nn.Module):
                 for i in range(self.beam_size):
                     pred_doc = last_prediction[i]
                     last_pred_idx.add(current_preds[i][-1])
-                    new_question_ids = pre_question_ids[pred_doc]
+                    # For subsequent hops, create new combinations with previous context
+                    new_question_context = pre_question_ids[pred_doc] if isinstance(pre_question_ids, list) else context_ids[pred_doc]
                     qp_len = {}
                     
                     for j in range(len(context_ids)):
                         if j in current_preds[i] or j in last_pred_idx:
                             continue
-                        qp_len[j] = min(
-                            self.max_seq_len - 2 - (hops - 1 - idx) * mean_passage_len,
-                            new_question_ids.shape[-1] + context_ids[j].shape[-1]
-                        )
+                        # New format: [CLS] + Q + previous_contexts + new_context + [SEP]
+                        # Estimate combined length
+                        qp_len[j] = min(self.max_seq_len, len(new_question_context) + len(context_ids[j]))
                         max_qp_len = max(max_qp_len, qp_len[j])
                     
                     qp_len_total[i] = qp_len
@@ -264,21 +256,13 @@ class Retriever(nn.Module):
                 if len(qp_len_total) < 1:
                     break
                 
-                # Handle negative sampling
-                if self.use_negative_sampling and self.training:
-                    sampled_set = self.get_negative_sampling_results(
-                        context_ids, current_preds, sf_idx[:idx+1]
-                    )
-                    vector_num = 1
-                    for k in range(self.beam_size):
-                        vector_num += len(sampled_set[k])
-                else:
-                    vector_num = sum([len(v) for k, v in qp_len_total.items()])
+
+                vector_num = sum([len(v) for k, v in qp_len_total.items()])
                 
                 # Setup vectors for current hop
-                hop_qp_ids = torch.zeros([vector_num, max_qp_len + 2], 
+                hop_qp_ids = torch.zeros([vector_num, max_qp_len], 
                                        device=device, dtype=torch.long)
-                hop_qp_attention_mask = torch.zeros([vector_num, max_qp_len + 2], 
+                hop_qp_attention_mask = torch.zeros([vector_num, max_qp_len], 
                                                   device=device, dtype=torch.long)
                 
                 if self.training:
@@ -293,34 +277,49 @@ class Retriever(nn.Module):
                 for i in range(self.beam_size):
                     pred_doc = last_prediction[i]
                     last_pred_idx.add(current_preds[i][-1])
-                    new_question_ids = pre_question_ids[pred_doc]
+                    prev_sequence = pre_question_ids[pred_doc]
                     
                     for j in range(len(context_ids)):
                         if j in current_preds[i] or j in last_pred_idx:
                             continue
                         
-                        if self.training and self.use_negative_sampling:
-                            if (j not in sampled_set[i] and 
-                                not (set(current_preds[i] + [j]) == set(sf_idx[:idx+1]))):
-                                continue
+                        # Create new sequence: combine previous sequence with new context
+                        # Format: [CLS] + Q + prev_contexts + new_context + [SEP]
                         
-                        # Prepare context sequence
-                        pre_context_ids = new_question_ids[question_ids.shape[-1]:].clone().detach()
-                        context_list = [pre_context_ids, context_ids[j]]
+                        # Extract question and previous contexts (remove [SEP] from end)
+                        prev_without_sep = prev_sequence[:-1] if prev_sequence[-1] == self.tokenizer.sep_token_id else prev_sequence
                         
-                        if self.training:
-                            random.shuffle(context_list)
+                        # Extract new context (remove [CLS] from beginning and [SEP] from end if present)
+                        new_context = context_ids[j]
+                        if new_context[0] == self.tokenizer.cls_token_id:
+                            # Find where the actual context starts (after question part)
+                            # For simplicity, take everything after first quarter as context
+                            context_start = len(new_context) // 4
+                            new_context_part = new_context[context_start:]
+                            if new_context_part[-1] == self.tokenizer.sep_token_id:
+                                new_context_part = new_context_part[:-1]
+                        else:
+                            new_context_part = new_context
                         
-                        this_question_ids = torch.cat((
-                            question_ids, 
-                            torch.cat((context_list[0], context_list[1]))
-                        ))[:qp_len_total[i][j]]
+                        # Combine: prev_sequence + new_context + [SEP]
+                        combined_sequence = torch.cat([
+                            prev_without_sep,
+                            new_context_part,
+                            torch.tensor([self.tokenizer.sep_token_id], device=device)
+                        ])
                         
-                        next_question_ids.append(this_question_ids)
-                        hop_qp_ids[vec_idx, 1:qp_len_total[i][j]+1] = this_question_ids
-                        hop_qp_ids[vec_idx, 0] = self.tokenizer.cls_token_id
-                        hop_qp_ids[vec_idx, qp_len_total[i][j]+1] = self.tokenizer.sep_token_id
-                        hop_qp_attention_mask[vec_idx, :qp_len_total[i][j]+1] = 1
+                        # Truncate if too long
+                        if len(combined_sequence) > max_qp_len:
+                            combined_sequence = combined_sequence[:max_qp_len-1]
+                            combined_sequence = torch.cat([combined_sequence, torch.tensor([self.tokenizer.sep_token_id], device=device)])
+                        
+                        # Store for next iteration
+                        next_question_ids.append(combined_sequence)
+                        
+                        # Fill tensors
+                        seq_len = len(combined_sequence)
+                        hop_qp_ids[vec_idx, :seq_len] = combined_sequence
+                        hop_qp_attention_mask[vec_idx, :seq_len] = 1
                         
                         if self.training:
                             if set(current_preds[i] + [j]) == set(sf_idx[:idx+1]):
