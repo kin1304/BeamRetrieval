@@ -1,21 +1,33 @@
-# Core dependencies
-numpy>=1.19.0
-scipy>=1.5.0
-requests>=2.25.0
+# Core dependencies for BeamRetrieval Multi-Hop Reasoning System
+numpy>=1.21.0
+scipy>=1.7.0
+requests>=2.28.0
 
-# Machine Learning & NLP
-transformers>=4.21.0
-torch>=1.12.0
-sentence-transformers>=2.2.0
+# Deep Learning & NLP Framework
+torch>=2.0.0
+transformers>=4.30.0
+tokenizers>=0.13.0
 
-# Optional dependencies
-pandas>=1.1.0
-scikit-learn>=0.24.0
+# Progress tracking and utilities
+tqdm>=4.64.0
 
-# Development dependencies
-pytest>=6.0.0
-flake8>=3.8.0
+# Data processing
+pandas>=1.5.0
+scikit-learn>=1.1.0
+datasets>=2.10.0
 
-# Text processing
-nltk>=3.5
-# spacy>=3.0.0
+# Development and Testing (Optional)
+pytest>=7.0.0
+flake8>=5.0.0
+
+# Text processing (Optional)
+nltk>=3.7
+
+# Configuration and logging
+pyyaml>=6.0
+
+# Memory optimization for large models (Optional)
+# accelerate>=0.20.0    # For distributed training and memory optimization
+# deepspeed>=0.9.0      # For advanced memory management
+# nvidia-ml-py>=12.0.0  # For NVIDIA GPU monitoring
+# psutil>=5.9.0         # For system monitoring
