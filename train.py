@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Main Training Script for Advanced Multi-Hop Retriever
-Usage: python train.py [--samples N] [--epochs N] [--batch_size N] [--gpu]
+Usage: python train.py [--dataset train/dev] [--samples N] [--epochs N] [--batch_size N] [--gpu]
 """
 import argparse
 import sys
@@ -289,6 +289,8 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
 def main():
     parser = argparse.ArgumentParser(description='Train Advanced Multi-Hop Retriever - Paper Configuration')
     # ========== PAPER CONFIGURATION (DEFAULT VALUES) ==========
+    parser.add_argument('--dataset', type=str, default='train', choices=['train', 'dev'], 
+                       help='Dataset to use for training (train or dev)')
     parser.add_argument('--samples', type=int, default=None, help='Number of training samples (None = FULL DATASET)')
     parser.add_argument('--epochs', type=int, default=2, help='Number of epochs (Paper: 16, Test: 2)')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size (Paper: 1)')
@@ -303,17 +305,36 @@ def main():
     
     args = parser.parse_args()
     
-    # Display Paper Configuration vs Current Settings
-    print("📖 PAPER CONFIGURATION TRAINING")
+    # Display configuration based on dataset
+    dataset_info = {
+        'train': ('FULL HOTPOT QA TRAIN (~90K samples)', 'training'),
+        'dev': ('FULL HOTPOT QA DEV (~7.4K samples)', 'development/validation')
+    }
+    
+    dataset_name, dataset_purpose = dataset_info[args.dataset]
+    
+    print(f"📖 TRAINING ON {args.dataset.upper()} SET")
     print("=" * 60)
-    print(f"📊 Dataset: {'FULL HOTPOT QA (~90K samples)' if args.samples is None else f'{args.samples} samples'}")
+    print(f"📊 Dataset: {dataset_name if args.samples is None else f'{args.samples} {args.dataset} samples'}")
+    print(f"🎯 Purpose: Using {dataset_purpose} data for training")
+    if args.dataset == 'dev':
+        print(f"⚠️  NOTE: Training on DEV set - typically used for testing/validation")
+        print(f"📈 This can be useful for quick experiments or debugging")
     print(f"🔄 Epochs: {args.epochs} {'✅ (Paper: 16)' if args.epochs == 16 else '⚠️ (Paper: 16)'}")
     print(f"📦 Batch size: {args.batch_size} {'✅ (Paper: 1)' if args.batch_size == 1 else '⚠️ (Paper: 1)'}")
     print(f"🎯 Learning rate: {args.learning_rate} {'✅ (Paper: 2e-5)' if args.learning_rate == 2e-5 else '⚠️ (Paper: 2e-5)'}")
     print(f"📏 Max length: {args.max_len} {'✅ (Paper: 512)' if args.max_len == 512 else '⚠️ (Paper: 512)'}")
     print(f"⚡ Mixed precision: {args.mixed_precision}")
-    print(f"� Gradient checkpointing: {args.gradient_checkpointing}")
-    print(f"�🔢 Max batches: {'UNLIMITED' if args.max_batches is None else args.max_batches}")
+    print(f"🔄 Gradient checkpointing: {args.gradient_checkpointing}")
+    print(f"🔢 Max batches: {'UNLIMITED' if args.max_batches is None else args.max_batches}")
+    
+    # Auto-adjust save path based on dataset
+    if args.save_path == 'models/deberta_v3_paper_full.pt':  # Default path
+        if args.dataset == 'dev':
+            args.save_path = 'models/deberta_v3_paper_dev.pt'
+        else:
+            args.save_path = 'models/deberta_v3_paper_train.pt'
+    
     print(f"💾 Save path: {args.save_path}")
     print("=" * 60)
     
@@ -327,8 +348,8 @@ def main():
     )
     
     if is_paper_config:
-        print("🎉 EXACT PAPER CONFIGURATION DETECTED!")
-        print("📖 Training with exact settings from the paper")
+        print(f"🎉 EXACT PAPER CONFIGURATION DETECTED! (using {args.dataset.upper()} set)")
+        print(f"📖 Training with exact settings from the paper on {args.dataset} data")
     else:
         print("⚠️  Custom configuration - differs from paper settings")
         print("📝 To use exact paper config, run without arguments")
@@ -339,10 +360,12 @@ def main():
     if args.gpu and not torch.cuda.is_available():
         print("⚠️  GPU requested but not available, using CPU")
     
-    # Load data
-    print("\n📚 Loading data...")
-    train_data = load_hotpot_data('train', sample_size=args.samples)
-    print(f"✅ Loaded {len(train_data)} training samples")
+    # Load data - using the selected dataset
+    print(f"\n📚 Loading {args.dataset.upper()} data for training...")
+    train_data = load_hotpot_data(args.dataset, sample_size=args.samples)
+    print(f"✅ Loaded {len(train_data)} {args.dataset.upper()} samples for training")
+    if args.dataset == 'dev':
+        print(f"⚠️  NOTE: Using DEV set as training data!")
     
     # Create model
     print("\n🧠 Creating model...")
@@ -352,7 +375,7 @@ def main():
         use_focal=True,
         use_early_stop=True,
         max_seq_len=args.max_len,
-        gradient_checkpointing=args.gradient_checkpointing  # Use command line argument
+        gradient_checkpointing=args.gradient_checkpointing
     )
     model.to(device)
     print(f"✅ Model created with {model.count_parameters():,} parameters")
@@ -411,7 +434,7 @@ def main():
             dataloader=dataloader,
             optimizer=optimizer,
             device=device,
-            max_batches=args.max_batches,  # Limit batches to prevent memory issues
+            max_batches=args.max_batches,
             scaler=scaler
         )
         
@@ -445,6 +468,7 @@ def main():
                     'beam_size': 2,
                     'use_focal': True,
                     'max_seq_len': args.max_len,
+                    'dataset': args.dataset,
                     'samples': args.samples,
                     'epochs': args.epochs,
                     'batch_size': args.batch_size,
@@ -465,8 +489,14 @@ def main():
     print(f"🏆 Best F1: {best_f1:.4f}, Best EM: {best_em:.4f}")
     print(f"💾 Model saved to {args.save_path}")
     
-    # Detailed explanation of metrics
-    print(f"\n📚 Metrics Explanation:")
+    # Dataset summary
+    dataset_summary = f"Trained on {args.dataset.upper()} set"
+    if args.dataset == 'dev':
+        dataset_summary += " (development data used for training)"
+    
+    print(f"\n📚 Training Summary:")
+    print(f"• Dataset: {dataset_summary}")
+    print(f"• Samples: {len(train_data):,}")
     print(f"• F1 Score: Measures partial overlap between predicted and target supporting facts")
     print(f"• EM Score: Exact Match - 1.0 only when predictions exactly match targets")
     print(f"• Why EM=0? Model is learning gradually - partial matches (F1>0) come before exact matches")
