@@ -170,16 +170,86 @@ def collate_fn(batch):
         'hops': [item['hop'] for item in batch]
     }
 
+def evaluate_model(model, dataloader, device, max_batches=None):
+    """Evaluate model and return average F1, EM, and loss"""
+    model.eval()
+    eval_losses = []
+    eval_f1_scores = []
+    eval_em_scores = []
+    
+    with torch.no_grad():
+        progress_bar = tqdm(dataloader, desc="Evaluating")
+        for batch_idx, batch in enumerate(progress_bar):
+            batch_f1 = 0
+            batch_em = 0
+            valid_samples = 0
+            
+            # Process each sample in batch individually
+            for i in range(len(batch['q_codes'])):
+                try:
+                    # Move data to device efficiently
+                    q_codes = [q.to(device, non_blocking=True) for q in batch['q_codes'][i]]
+                    c_codes = [c.to(device, non_blocking=True) for c in batch['c_codes'][i]]
+                    sf_idx = [s.to(device, non_blocking=True) for s in batch['sf_idx'][i]]
+                    hop = batch['hops'][i]
+                    
+                    outputs = model(q_codes, c_codes, sf_idx, hop)
+                    loss = outputs['loss']
+                    
+                    if not torch.isnan(loss):
+                        valid_samples += 1
+                        eval_losses.append(loss.item())
+                        
+                        # Calculate F1 and EM
+                        if 'final_preds' in outputs and outputs['final_preds']:
+                            predictions = outputs['final_preds'][0] if outputs['final_preds'][0] else []
+                        elif 'current_preds' in outputs and outputs['current_preds']:
+                            predictions = outputs['current_preds'][0] if outputs['current_preds'][0] else []
+                        else:
+                            predictions = []
+                        
+                        targets = sf_idx[0].cpu().tolist()
+                        f1, em = calculate_f1_em(predictions, targets)
+                        batch_f1 += f1
+                        batch_em += em
+                        eval_f1_scores.append(f1)
+                        eval_em_scores.append(em)
+                        
+                except Exception as e:
+                    print(f"Evaluation sample {i} failed: {e}")
+                    continue
+            
+            if valid_samples > 0:
+                avg_f1 = batch_f1 / valid_samples
+                avg_em = batch_em / valid_samples
+                
+                progress_bar.set_postfix({
+                    'loss': f'{eval_losses[-1]:.4f}' if eval_losses else '0.0000',
+                    'f1': f'{avg_f1:.4f}',
+                    'em': f'{avg_em:.4f}'
+                })
+            
+            # Early break if max_batches specified
+            if max_batches and batch_idx >= max_batches - 1:
+                break
+    
+    # Calculate averages
+    avg_f1 = sum(eval_f1_scores) / len(eval_f1_scores) if eval_f1_scores else 0.0
+    avg_em = sum(eval_em_scores) / len(eval_em_scores) if eval_em_scores else 0.0
+    avg_loss = sum(eval_losses) / len(eval_losses) if eval_losses else 0.0
+    
+    return avg_f1, avg_em, avg_loss
+
 def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=None):
-    """Train for one epoch with GPU optimization"""
+    """Train for one epoch with GPU optimization and comprehensive metrics"""
     model.train()
     epoch_losses = []
     f1_scores = []
     em_scores = []
     
-    # Calculate 30% checkpoint for reporting
+    # Calculate checkpoint intervals for reporting
     total_batches = max_batches if max_batches else len(dataloader)
-    checkpoint_30_percent = int(total_batches * 0.3)
+    checkpoint_intervals = [int(total_batches * p) for p in [0.25, 0.5, 0.75]]
     
     progress_bar = tqdm(dataloader, desc="Training")
     for batch_idx, batch in enumerate(progress_bar):
@@ -264,27 +334,33 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
         if torch.cuda.is_available() and batch_idx % 10 == 0:
             torch.cuda.empty_cache()
         
-        # Report metrics at 30% checkpoint
-        if batch_idx == checkpoint_30_percent and f1_scores and em_scores:
+        # Report metrics at checkpoints (25%, 50%, 75%)
+        if batch_idx in checkpoint_intervals and f1_scores and em_scores:
             current_avg_f1 = sum(f1_scores) / len(f1_scores)
             current_avg_em = sum(em_scores) / len(em_scores)
             current_avg_loss = sum(epoch_losses) / len(epoch_losses)
-            print(f"\n📊 30% Checkpoint ({batch_idx+1}/{total_batches} batches):")
+            checkpoint_pct = int((batch_idx / total_batches) * 100)
+            
+            print(f"\n📊 {checkpoint_pct}% Checkpoint ({batch_idx+1}/{total_batches} batches):")
             print(f"   Average Loss: {current_avg_loss:.4f}")
             print(f"   Average F1: {current_avg_f1:.4f}")
             print(f"   Average EM: {current_avg_em:.4f}")
             print(f"   Max F1 so far: {max(f1_scores):.4f}")
             print(f"   Max EM so far: {max(em_scores):.4f}")
+            print(f"   Samples processed: {len(f1_scores)}")
         
         # Early break if max_batches specified
         if max_batches and batch_idx >= max_batches - 1:
             break
     
+    # Calculate final averages and max values
+    avg_f1 = sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
+    avg_em = sum(em_scores) / len(em_scores) if em_scores else 0.0
     max_f1 = max(f1_scores) if f1_scores else 0.0
     max_em = max(em_scores) if em_scores else 0.0
     avg_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0.0
     
-    return max_f1, max_em, avg_loss
+    return avg_f1, avg_em, max_f1, max_em, avg_loss
 
 def main():
     parser = argparse.ArgumentParser(description='Train Advanced Multi-Hop Retriever - Paper Configuration')
@@ -421,8 +497,10 @@ def main():
     if torch.cuda.is_available():
         print(f"🔥 GPU Memory before training: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
     
-    best_f1 = 0.0
-    best_em = 0.0
+    best_avg_f1 = 0.0
+    best_avg_em = 0.0
+    best_max_f1 = 0.0
+    best_max_em = 0.0
     train_metrics = []
     
     for epoch in range(args.epochs):
@@ -432,7 +510,7 @@ def main():
         if torch.cuda.is_available():
             print(f"🔥 GPU Memory before epoch: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
         
-        max_f1, max_em, avg_loss = train_epoch(
+        avg_f1, avg_em, max_f1, max_em, avg_loss = train_epoch(
             model=model,
             dataloader=dataloader,
             optimizer=optimizer,
@@ -441,68 +519,126 @@ def main():
             scaler=scaler
         )
         
-        train_metrics.append({
+        # Store detailed metrics
+        epoch_metrics = {
             'epoch': epoch + 1,
+            'avg_f1': avg_f1,
+            'avg_em': avg_em,
             'max_f1': max_f1,
             'max_em': max_em,
             'avg_loss': avg_loss
-        })
+        }
+        train_metrics.append(epoch_metrics)
         
-        print(f"📊 Epoch {epoch+1} - Max F1: {max_f1:.4f}, Max EM: {max_em:.4f}, Avg Loss: {avg_loss:.4f}")
+        print(f"\n🎯 EPOCH {epoch+1}/{args.epochs} - FINAL METRICS")
+        print(f"=" * 50)
+        print(f"📊 Average Metrics (Trung bình toàn epoch):")
+        print(f"   • Average F1 Score: {avg_f1:.4f}")
+        print(f"   • Average EM Score: {avg_em:.4f}")
+        print(f"   • Average Loss: {avg_loss:.4f}")
+        print(f"📈 Best Individual Predictions This Epoch:")
+        print(f"   • Max F1 Score: {max_f1:.4f}")
+        print(f"   • Max EM Score: {max_em:.4f}")
+        print(f"=" * 50)
         
         # GPU memory info
         if torch.cuda.is_available():
             print(f"🔥 GPU Memory after epoch: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
         
-        # Save model if F1 improves
-        if max_f1 > best_f1:
-            best_f1 = max_f1
-            best_em = max_em
-            torch.save({
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'epoch': epoch,
-                'max_f1': max_f1,
-                'max_em': max_em,
-                'avg_loss': avg_loss,
-                'train_metrics': train_metrics,
-                'config': {
-                    'model_name': 'microsoft/deberta-v3-base',
-                    'beam_size': 2,
-                    'use_focal': True,
-                    'max_seq_len': args.max_len,
-                    'dataset': args.dataset,
-                    'samples': args.samples,
-                    'epochs': args.epochs,
-                    'batch_size': args.batch_size,
-                    'learning_rate': args.learning_rate
-                }
-            }, args.save_path)
-            print(f"💾 Best model saved to {args.save_path} (F1: {max_f1:.4f}, EM: {max_em:.4f})")
-            print(f"📈 F1 improvement: {max_f1:.4f}")
+        # Save checkpoint after every epoch with complete metrics
+        checkpoint_data = {
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'epoch': epoch + 1,
+            'metrics': epoch_metrics,
+            'best_metrics': {
+                'best_avg_f1': max(best_avg_f1, avg_f1),
+                'best_avg_em': max(best_avg_em, avg_em),
+                'best_max_f1': max(best_max_f1, max_f1),
+                'best_max_em': max(best_max_em, max_em)
+            },
+            'train_metrics_history': train_metrics,
+            'config': {
+                'model_name': 'microsoft/deberta-v3-base',
+                'beam_size': 2,
+                'use_focal': True,
+                'max_seq_len': args.max_len,
+                'dataset': args.dataset,
+                'samples': args.samples,
+                'epochs': args.epochs,
+                'batch_size': args.batch_size,
+                'learning_rate': args.learning_rate,
+                'num_contexts': num_contexts
+            }
+        }
         
-        # Explain why EM might be 0
-        if max_em == 0.0:
-            print(f"❗ EM = 0 means: No exact match between predicted and target supporting facts")
-            print(f"   - F1 > 0 means partial overlap exists (some correct predictions)")
-            print(f"   - This is normal in early training - model learns partial patterns first")
+        # Always save checkpoint after each epoch
+        torch.save(checkpoint_data, args.save_path)
+        print(f"💾 Checkpoint saved to {args.save_path}")
+        
+        # Update best metrics if improved
+        if avg_f1 > best_avg_f1:
+            best_avg_f1 = avg_f1
+            best_avg_em = avg_em
+            best_max_f1 = max_f1
+            best_max_em = max_em
+            print(f"🏆 NEW BEST! Average F1 improved: {avg_f1:.4f}")
+        elif avg_f1 == best_avg_f1 and max_f1 > best_max_f1:
+            # Tie-breaker: if avg F1 is same, prefer higher max F1
+            best_avg_f1 = avg_f1
+            best_avg_em = avg_em
+            best_max_f1 = max_f1
+            best_max_em = max_em
+            print(f"🏆 NEW BEST! Max F1 improved: {max_f1:.4f} (avg F1 tied)")
+        
+        print(f"📈 Current Best Metrics So Far:")
+        print(f"   • Best Avg F1: {max(best_avg_f1, avg_f1):.4f}")
+        print(f"   • Best Avg EM: {max(best_avg_em, avg_em):.4f}")
+        print(f"   • Best Max F1: {max(best_max_f1, max_f1):.4f}")
+        print(f"   • Best Max EM: {max(best_max_em, max_em):.4f}")
+        
+        # Explain metrics for clarity
+        print(f"\n📝 Giải thích Metrics:")
+        print(f"   • F1 Score = Độ chính xác tổng hợp (precision + recall)")
+        print(f"   • EM Score = Exact Match (1.0 chỉ khi dự đoán hoàn toàn chính xác)")
+        print(f"   • Average = Trung bình trên toàn bộ samples")
+        print(f"   • Max = Điểm số cao nhất trong epoch này")
+        if avg_em == 0.0 and avg_f1 > 0.0:
+            print(f"   • EM=0 nhưng F1>0: Mô hình đang học từng phần, chưa dự đoán hoàn toàn chính xác")
+        
+        print(f"-" * 60)
     
-    print(f"\n🎉 Training completed!")
-    print(f"📈 Final metrics - F1: {train_metrics[-1]['max_f1']:.4f}, EM: {train_metrics[-1]['max_em']:.4f}")
-    print(f"🏆 Best F1: {best_f1:.4f}, Best EM: {best_em:.4f}")
-    print(f"💾 Model saved to {args.save_path}")
+    print(f"\n🎉 TRAINING HOÀN THÀNH!")
+    print(f"=" * 60)
+    print(f"📈 Metrics Epoch Cuối Cùng:")
+    print(f"   • Average F1: {train_metrics[-1]['avg_f1']:.4f}")
+    print(f"   • Average EM: {train_metrics[-1]['avg_em']:.4f}")
+    print(f"   • Average Loss: {train_metrics[-1]['avg_loss']:.4f}")
+    print(f"🏆 Metrics Tốt Nhất Đạt Được:")
+    print(f"   • Best Average F1: {max(best_avg_f1, train_metrics[-1]['avg_f1']):.4f}")
+    print(f"   • Best Average EM: {max(best_avg_em, train_metrics[-1]['avg_em']):.4f}")
+    print(f"   • Best Max F1: {max(best_max_f1, train_metrics[-1]['max_f1']):.4f}")
+    print(f"   • Best Max EM: {max(best_max_em, train_metrics[-1]['max_em']):.4f}")
+    print(f"💾 Model và checkpoint đã lưu: {args.save_path}")
+    print(f"=" * 60)
     
-    # Dataset summary
+    # Training summary in Vietnamese
     dataset_summary = f"Trained on {args.dataset.upper()} set"
     if args.dataset == 'dev':
-        dataset_summary += " (development data used for training)"
+        dataset_summary += " (sử dụng development data để training)"
     
-    print(f"\n📚 Training Summary:")
+    print(f"\n📚 Tóm Tắt Training:")
     print(f"• Dataset: {dataset_summary}")
-    print(f"• Samples: {len(train_data):,}")
-    print(f"• F1 Score: Measures partial overlap between predicted and target supporting facts")
-    print(f"• EM Score: Exact Match - 1.0 only when predictions exactly match targets")
-    print(f"• Why EM=0? Model is learning gradually - partial matches (F1>0) come before exact matches")
+    print(f"• Số samples: {len(train_data):,}")
+    print(f"• Số epochs: {args.epochs}")
+    print(f"• Checkpoint bao gồm: model weights, optimizer state, metrics history, config")
+    print(f"• Có thể load lại model bằng: python evaluate_checkpoint.py --checkpoint_path {args.save_path}")
+    print(f"\n📊 Ý Nghĩa Metrics:")
+    print(f"• F1 Score: Đo độ chính xác khi có partial match giữa dự đoán và target")
+    print(f"• EM Score: Exact Match - chỉ = 1.0 khi dự đoán hoàn toàn chính xác")
+    print(f"• Average: Hiệu suất trung bình trên toàn bộ dataset")
+    print(f"• Max: Hiệu suất tốt nhất trong từng epoch")
+    print(f"• Tại sao EM=0? Model học dần dần - partial matches (F1>0) xuất hiện trước exact matches")
 
 if __name__ == "__main__":
     main()
