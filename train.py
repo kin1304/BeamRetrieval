@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer
+from transformers import DebertaV2Tokenizer
 from tqdm import tqdm
 import random
 
@@ -258,7 +258,8 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
                 
                 # Mixed precision forward pass
                 if scaler is not None:
-                    with torch.cuda.amp.autocast():
+
+                    with torch.cuda.amp.autocast('cuda'):
                         # 🚀 TỐI ƯU: Sử dụng p_codes (chuỗi đoạn văn) và context_mapping
                         outputs = model(q_codes, p_codes, sf_idx, hop, context_mapping=context_mapping)
                         loss = outputs['loss']
@@ -450,11 +451,13 @@ def main():
     # Tạo dataset và dataloader
     print("\n📦 Đang tạo dataset...")
     tokenizer = model.tokenizer
+
     dataset = RetrievalDataset(train_data, tokenizer, max_len=args.max_len, num_contexts=5)
     
     # Pin memory để chuyển GPU nhanh hơn
     pin_memory = torch.cuda.is_available()
     num_workers = 2 if torch.cuda.is_available() else 0
+
     
     dataloader = DataLoader(
         dataset, 

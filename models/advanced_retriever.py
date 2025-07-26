@@ -11,7 +11,7 @@ import random
 import math
 from typing import List, Dict, Any, Optional, Tuple
 import logging
-from transformers import AutoTokenizer, AutoModel, AutoConfig
+from transformers import DebertaV2Tokenizer, AutoModel, AutoConfig
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ class Retriever(nn.Module):
         import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*sentencepiece tokenizer.*")
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.tokenizer = DebertaV2Tokenizer.from_pretrained(model_name)
         
         logger.info(f"🧠 Retriever khởi tạo với {self.count_parameters():,} parameters")
         logger.info(f"📊 Beam size: {beam_size}, Max seq len: {max_seq_len}")
