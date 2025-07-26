@@ -588,6 +588,62 @@ class Retriever(nn.Module):
         
         # Trả về top contexts (placeholder)
         return contexts[:self.beam_size]
+    
+    def get_model_summary(self):
+        """
+        Get comprehensive model summary with parameters and configuration
+        """
+        summary = {
+            'model_info': {
+                'total_parameters': self.count_parameters(),
+                'model_name': 'microsoft/deberta-v3-base',
+                'architecture': 'Advanced Multi-Hop Retriever with Focal Loss'
+            },
+            'configuration': {
+                'max_seq_len': self.max_seq_len,
+                'mean_passage_len': self.mean_passage_len,
+                'beam_size': self.beam_size,
+                'use_focal': self.use_focal,
+                'use_early_stop': self.use_early_stop,
+                'gradient_checkpointing': self.gradient_checkpointing
+            },
+            'capabilities': {
+                'multi_hop_reasoning': True,
+                'beam_search': True,
+                'focal_loss': self.use_focal,
+                'paragraph_level_processing': True,
+                'context_combination': True
+            }
+        }
+        return summary
+    
+    def print_model_summary(self):
+        """Print formatted model summary"""
+        summary = self.get_model_summary()
+        
+        print(f"\n🧠 Advanced Multi-Hop Retriever Model Summary")
+        print(f"=" * 60)
+        
+        # Model info
+        print(f"📊 Model Information:")
+        for key, value in summary['model_info'].items():
+            if key == 'total_parameters':
+                print(f"   • {key.replace('_', ' ').title()}: {value:,}")
+            else:
+                print(f"   • {key.replace('_', ' ').title()}: {value}")
+        
+        # Configuration
+        print(f"\n⚙️  Configuration:")
+        for key, value in summary['configuration'].items():
+            print(f"   • {key.replace('_', ' ').title()}: {value}")
+        
+        # Capabilities
+        print(f"\n🚀 Capabilities:")
+        for key, value in summary['capabilities'].items():
+            status = "✅ Enabled" if value else "❌ Disabled"
+            print(f"   • {key.replace('_', ' ').title()}: {status}")
+        
+        print(f"=" * 60)
 
 
 # Factory function

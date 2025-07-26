@@ -225,7 +225,78 @@ def collate_fn(batch):
         'hops': [item['hop'] for item in batch]
     }
 
+def evaluate_model(model, dataloader, device, max_batches=None):
+    """Evaluate model and return average F1, EM, and loss"""
+    model.eval()
+    eval_losses = []
+    eval_f1_scores = []
+    eval_em_scores = []
+    
+    with torch.no_grad():
+        progress_bar = tqdm(dataloader, desc="Evaluating")
+        for batch_idx, batch in enumerate(progress_bar):
+            batch_f1 = 0
+            batch_em = 0
+            valid_samples = 0
+            
+            # Process each sample in batch individually
+            for i in range(len(batch['q_codes'])):
+                try:
+                    # Move data to device efficiently
+                    q_codes = [q.to(device, non_blocking=True) for q in batch['q_codes'][i]]
+                    c_codes = [c.to(device, non_blocking=True) for c in batch['c_codes'][i]]
+                    sf_idx = [s.to(device, non_blocking=True) for s in batch['sf_idx'][i]]
+                    hop = batch['hops'][i]
+                    
+                    outputs = model(q_codes, c_codes, sf_idx, hop)
+                    loss = outputs['loss']
+                    
+                    if not torch.isnan(loss):
+                        valid_samples += 1
+                        eval_losses.append(loss.item())
+                        
+                        # Calculate F1 and EM
+                        if 'final_preds' in outputs and outputs['final_preds']:
+                            predictions = outputs['final_preds'][0] if outputs['final_preds'][0] else []
+                        elif 'current_preds' in outputs and outputs['current_preds']:
+                            predictions = outputs['current_preds'][0] if outputs['current_preds'][0] else []
+                        else:
+                            predictions = []
+                        
+                        targets = sf_idx[0].cpu().tolist()
+                        f1, em = calculate_f1_em(predictions, targets)
+                        batch_f1 += f1
+                        batch_em += em
+                        eval_f1_scores.append(f1)
+                        eval_em_scores.append(em)
+                        
+                except Exception as e:
+                    print(f"Evaluation sample {i} failed: {e}")
+                    continue
+            
+            if valid_samples > 0:
+                avg_f1 = batch_f1 / valid_samples
+                avg_em = batch_em / valid_samples
+                
+                progress_bar.set_postfix({
+                    'loss': f'{eval_losses[-1]:.4f}' if eval_losses else '0.0000',
+                    'f1': f'{avg_f1:.4f}',
+                    'em': f'{avg_em:.4f}'
+                })
+            
+            # Early break if max_batches specified
+            if max_batches and batch_idx >= max_batches - 1:
+                break
+    
+    # Calculate averages
+    avg_f1 = sum(eval_f1_scores) / len(eval_f1_scores) if eval_f1_scores else 0.0
+    avg_em = sum(eval_em_scores) / len(eval_em_scores) if eval_em_scores else 0.0
+    avg_loss = sum(eval_losses) / len(eval_losses) if eval_losses else 0.0
+    
+    return avg_f1, avg_em, avg_loss
+
 def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=None):
+
     """Train một epoch với tối ưu hóa GPU"""
     model.train()
     epoch_losses = []
@@ -233,8 +304,9 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
     em_scores = []
     
     # Tính toán checkpoint 30% để báo cáo
+
     total_batches = max_batches if max_batches else len(dataloader)
-    checkpoint_30_percent = int(total_batches * 0.3)
+    checkpoint_intervals = [int(total_batches * p) for p in [0.25, 0.5, 0.75]]
     
     progress_bar = tqdm(dataloader, desc="Training")
     for batch_idx, batch in enumerate(progress_bar):
@@ -325,7 +397,7 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
         # Xóa GPU cache định kỳ
         if torch.cuda.is_available() and batch_idx % 10 == 0:
             torch.cuda.empty_cache()
-        
+
         # Báo cáo metrics theo chu kỳ (mỗi 25% và 50%)
         if f1_scores and em_scores:
             current_avg_f1 = sum(f1_scores) / len(f1_scores)
@@ -340,18 +412,24 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
             if batch_idx in progress_checkpoints:
                 progress_pct = int((batch_idx / total_batches) * 100)
                 print(f"{progress_pct}% ({batch_idx+1}/{total_batches}) - Loss: {current_avg_loss:.4f}, F1: {current_max_f1:.4f}, EM: {current_max_em:.4f}")
+
         
         # Dừng sớm nếu max_batches được chỉ định
         if max_batches and batch_idx >= max_batches - 1:
             break
     
+    # Calculate final averages and max values
+    avg_f1 = sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
+    avg_em = sum(em_scores) / len(em_scores) if em_scores else 0.0
     max_f1 = max(f1_scores) if f1_scores else 0.0
     max_em = max(em_scores) if em_scores else 0.0
     avg_f1 = sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
     avg_em = sum(em_scores) / len(em_scores) if em_scores else 0.0
     avg_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0.0
     
+
     return max_f1, max_em, avg_f1, avg_em, avg_loss
+
 
 def main():
     parser = argparse.ArgumentParser(description='Train Advanced Multi-Hop Retriever - Cấu hình Paper')
@@ -448,8 +526,10 @@ def main():
     if torch.cuda.is_available():
         print(f"🔥 GPU Memory trước khi training: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
     
-    best_f1 = 0.0
-    best_em = 0.0
+    best_avg_f1 = 0.0
+    best_avg_em = 0.0
+    best_max_f1 = 0.0
+    best_max_em = 0.0
     train_metrics = []
     
     for epoch in range(args.epochs):
@@ -459,7 +539,9 @@ def main():
         if torch.cuda.is_available():
             print(f"🔥 GPU Memory trước epoch: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
         
+
         max_f1, max_em, avg_f1, avg_em, avg_loss = train_epoch(
+
             model=model,
             dataloader=dataloader,
             optimizer=optimizer,
@@ -468,16 +550,21 @@ def main():
             scaler=scaler
         )
         
-        train_metrics.append({
+        # Store detailed metrics
+        epoch_metrics = {
             'epoch': epoch + 1,
+            'avg_f1': avg_f1,
+            'avg_em': avg_em,
             'max_f1': max_f1,
             'max_em': max_em,
             'avg_f1': avg_f1,
             'avg_em': avg_em,
             'avg_loss': avg_loss
-        })
-        
+        }
+        train_metrics.append(epoch_metrics)
+
         print(f"Epoch {epoch+1}: Max F1={max_f1:.4f}, Avg F1={avg_f1:.4f}, Max EM={max_em:.4f}, Avg EM={avg_em:.4f}, Loss={avg_loss:.4f}")
+
         
         # Thông tin GPU memory
         if torch.cuda.is_available():
@@ -519,6 +606,7 @@ def main():
     print(f"Best Max F1: {best_f1:.4f}, Best Max EM: {best_em:.4f}")
     print(f"Final Avg F1: {final_avg_f1:.4f}, Final Avg EM: {final_avg_em:.4f}")
     print(f"Model đã lưu tại: {args.save_path}")
+
 
 if __name__ == "__main__":
     main()
