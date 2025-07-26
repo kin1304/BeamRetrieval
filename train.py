@@ -10,13 +10,8 @@ Cách dùng: python tra                # Thêm nội dung còn lại
         
         # Đảm bảo ít nhất một đoạn văn
         if not paragraphs:
-            paragraphs = [context_text[:max_len] if context_text else "Không có nội dung."]ataset train/dev] [--samples N] [--epochs N] [--batch_size N]            marker = "🌟" if is_best else "  "
-            print(f"   {marker} Epoch {epoch}: F1={f1:.4f}, EM={em:.4f}")
-    
-    print(f"\n🎉 TRAINING HOÀN THÀNH!")
-    print(f"📊 Kết quả: F1={train_metrics[-1]['max_f1']:.4f}, EM={train_metrics[-1]['max_em']:.4f}")
-    print(f"🏆 Best F1: {best_f1:.4f}, Best EM: {best_em:.4f}")
-    print(f"💾 Model saved: {args.save_path}")"
+            paragraphs = [context_text[:max_len] if context_text else "Không có nội dung."]ataset train/dev] [--samples N] [--epochs N] [--batch_size N] [--gpu]
+"""
 import argparse
 import sys
 import os
@@ -344,20 +339,7 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
             
             if batch_idx in progress_checkpoints:
                 progress_pct = int((batch_idx / total_batches) * 100)
-                print(f"\n🎯 {progress_pct}% Progress ({batch_idx+1}/{total_batches} batches)")
-                print(f"📊 METRICS HIỆN TẠI:")
-                print(f"   • Loss: {current_avg_loss:.4f}")
-                print(f"   • F1 Avg: {current_avg_f1:.4f} | Max: {current_max_f1:.4f}")
-                print(f"   • EM Avg: {current_avg_em:.4f} | Max: {current_max_em:.4f}")
-                print(f"   • Samples với EM=1.0: {sum(1 for em in em_scores if em == 1.0)}/{len(em_scores)}")
-                
-                # Phân tích phân bố F1
-                high_f1 = sum(1 for f1 in f1_scores if f1 >= 0.5)
-                perfect_f1 = sum(1 for f1 in f1_scores if f1 == 1.0)
-                print(f"   • F1≥0.5: {high_f1}/{len(f1_scores)} | F1=1.0: {perfect_f1}/{len(f1_scores)}")
-                
-                if torch.cuda.is_available():
-                    print(f"   • GPU Memory: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
+                print(f"{progress_pct}% ({batch_idx+1}/{total_batches}) - Loss: {current_avg_loss:.4f}, F1: {current_max_f1:.4f}, EM: {current_max_em:.4f}")
         
         # Dừng sớm nếu max_batches được chỉ định
         if max_batches and batch_idx >= max_batches - 1:
@@ -365,9 +347,11 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
     
     max_f1 = max(f1_scores) if f1_scores else 0.0
     max_em = max(em_scores) if em_scores else 0.0
+    avg_f1 = sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
+    avg_em = sum(em_scores) / len(em_scores) if em_scores else 0.0
     avg_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0.0
     
-    return max_f1, max_em, avg_loss
+    return max_f1, max_em, avg_f1, avg_em, avg_loss
 
 def main():
     parser = argparse.ArgumentParser(description='Train Advanced Multi-Hop Retriever - Cấu hình Paper')
@@ -396,21 +380,8 @@ def main():
     
     dataset_name, dataset_purpose = dataset_info[args.dataset]
     
-    print(f"📖 TRAINING TRÊN {args.dataset.upper()} SET")
-    print("=" * 60)
-    print(f"📊 Dataset: {dataset_name if args.samples is None else f'{args.samples} {args.dataset} samples'}")
-    print(f"🎯 Mục đích: Sử dụng dữ liệu {dataset_purpose} cho training")
-    if args.dataset == 'dev':
-        print(f"⚠️  LƯU Ý: Training trên DEV set - thường dùng cho testing/validation")
-        print(f"📈 Có thể hữu ích cho thí nghiệm nhanh hoặc debug")
-    print(f"🔄 Epochs: {args.epochs} {'✅ (Paper: 16)' if args.epochs == 16 else '⚠️ (Paper: 16)'}")
-    print(f"📦 Batch size: {args.batch_size} {'✅ (Paper: 1)' if args.batch_size == 1 else '⚠️ (Paper: 1)'}")
-    print(f"🎯 Learning rate: {args.learning_rate} {'✅ (Paper: 2e-5)' if args.learning_rate == 2e-5 else '⚠️ (Paper: 2e-5)'}")
-    print(f"📏 Max length: {args.max_len} {'✅ (Paper: 512)' if args.max_len == 512 else '⚠️ (Paper: 512)'}")
-    print(f"⚡ Mixed precision: {args.mixed_precision}")
-    print(f"🔄 Gradient checkpointing: {args.gradient_checkpointing}")
-    print(f"🔢 Max batches: {'KHÔNG GIỚI HẠN' if args.max_batches is None else args.max_batches}")
-    
+    # Lựa chọn thiết bị
+    device = get_device()
     # Tự động điều chỉnh đường dẫn lưu dựa trên dataset
     if args.save_path == 'models/deberta_v3_paper_full.pt':  # Đường dẫn mặc định
         if args.dataset == 'dev':
@@ -418,40 +389,15 @@ def main():
         else:
             args.save_path = 'models/deberta_v3_paper_train.pt'
     
-    print(f"💾 Đường dẫn lưu: {args.save_path}")
-    print("=" * 60)
-    
-    # Kiểm tra tuân thủ paper
-    is_paper_config = (
-        args.samples is None and
-        args.epochs == 16 and
-        args.batch_size == 1 and
-        args.learning_rate == 2e-5 and
-        args.max_len == 512
-    )
-    
-    if is_paper_config:
-        print(f"🎉 PHÁT HIỆN CẤU HÌNH PAPER CHÍNH XÁC! (sử dụng {args.dataset.upper()} set)")
-        print(f"📖 Training với cài đặt chính xác từ paper trên dữ liệu {args.dataset}")
-    else:
-        print("⚠️  Cấu hình tùy chỉnh - khác với cài đặt paper")
-        print("📝 Để sử dụng cấu hình paper chính xác, chạy không có arguments")
-    print("=" * 60)
-    
-    # Lựa chọn thiết bị
-    device = get_device()
-    if args.gpu and not torch.cuda.is_available():
-        print("⚠️  Yêu cầu GPU nhưng không có sẵn, sử dụng CPU")
-    
-    # Tải dữ liệu - sử dụng dataset đã chọn
-    print(f"\n📚 Đang tải dữ liệu {args.dataset.upper()} cho training...")
+    # Tải dữ liệu
     train_data = load_hotpot_data(args.dataset, sample_size=args.samples)
-    print(f"✅ Đã tải {len(train_data)} {args.dataset.upper()} samples cho training")
-    if args.dataset == 'dev':
-        print(f"⚠️  LƯU Ý: Sử dụng DEV set làm dữ liệu training!")
+    
+    print(f"Training trên {len(train_data)} {args.dataset.upper()} samples")
+    print(f"Epochs: {args.epochs}, Batch size: {args.batch_size}, LR: {args.learning_rate}")
+    print(f"Model sẽ lưu tại: {args.save_path}")
+    print("=" * 60)
     
     # Tạo model
-    print("\n🧠 Đang tạo model...")
     model = create_advanced_retriever(
         model_name="microsoft/deberta-v3-base",
         beam_size=2,
@@ -461,7 +407,6 @@ def main():
         gradient_checkpointing=args.gradient_checkpointing
     )
     model.to(device)
-    print(f"✅ Model đã tạo với {model.count_parameters():,} parameters")
     
     # Thiết lập mixed precision
     scaler = None
@@ -514,7 +459,7 @@ def main():
         if torch.cuda.is_available():
             print(f"🔥 GPU Memory trước epoch: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
         
-        max_f1, max_em, avg_loss = train_epoch(
+        max_f1, max_em, avg_f1, avg_em, avg_loss = train_epoch(
             model=model,
             dataloader=dataloader,
             optimizer=optimizer,
@@ -527,31 +472,12 @@ def main():
             'epoch': epoch + 1,
             'max_f1': max_f1,
             'max_em': max_em,
+            'avg_f1': avg_f1,
+            'avg_em': avg_em,
             'avg_loss': avg_loss
         })
         
-        print(f"\n🎉 EPOCH {epoch+1} HOÀN THÀNH!")
-        print(f"=" * 60)
-        print(f"📊 KẾT QUẢ EPOCH {epoch+1}:")
-        print(f"   • Max F1 Score: {max_f1:.4f}")
-        print(f"   • Max EM Score: {max_em:.4f}")
-        print(f"   • Average Loss: {avg_loss:.4f}")
-        
-        # So sánh với epoch trước
-        if len(train_metrics) > 1:
-            prev_f1 = train_metrics[-2]['max_f1']
-            prev_em = train_metrics[-2]['max_em']
-            f1_change = max_f1 - prev_f1
-            em_change = max_em - prev_em
-            
-            print(f"📈 SO VỚI EPOCH TRƯỚC:")
-            print(f"   • F1 thay đổi: {f1_change:+.4f} {'📈' if f1_change > 0 else '📉' if f1_change < 0 else '➡️'}")
-            print(f"   • EM thay đổi: {em_change:+.4f} {'📈' if em_change > 0 else '📉' if em_change < 0 else '➡️'}")
-        
-        # Hiển thị trạng thái model tốt nhất
-        print(f"🏆 BEST MODEL SO FAR:")
-        print(f"   • Best F1: {best_f1:.4f}")
-        print(f"   • Best EM: {best_em:.4f}")
+        print(f"Epoch {epoch+1}: Max F1={max_f1:.4f}, Avg F1={avg_f1:.4f}, Max EM={max_em:.4f}, Avg EM={avg_em:.4f}, Loss={avg_loss:.4f}")
         
         # Thông tin GPU memory
         if torch.cuda.is_available():
@@ -584,74 +510,15 @@ def main():
                     'learning_rate': args.learning_rate
                 }
             }, args.save_path)
-            print(f"💾 🌟 MODEL MỚI TỐT NHẤT! Đã lưu vào {args.save_path}")
-            print(f"📈 F1 Score cải thiện: {best_f1:.4f} (tăng {max_f1 - (train_metrics[-2]['max_f1'] if len(train_metrics) > 1 else 0):.4f})")
-        else:
-            print(f"� Model hiện tại chưa vượt qua best F1: {best_f1:.4f}")
-        
-        # Giải thích metrics cho người dùng
-        if max_em == 0.0 and max_f1 > 0.0:
-            print(f"\n💡 GIẢI THÍCH METRICS:")
-            print(f"   • F1 = {max_f1:.4f} > 0: Model đã học được một số patterns ✅")
-            print(f"   • EM = 0: Chưa có prediction nào khớp hoàn toàn với target")
-            print(f"   • Điều này BÌNH THƯỜNG ở early epochs - model học partial matches trước!")
-        elif max_em > 0.0:
-            print(f"\n� GREAT! Model đã có {max_em:.1%} exact matches!")
+            print(f"Model mới tốt nhất lưu tại {args.save_path} (F1: {best_f1:.4f})")
     
     # Tóm tắt cuối training
-    print(f"\n" + "🎉" * 20)
-    print(f"🏁 TRAINING HOÀN THÀNH!")
-    print(f"🎉" * 20)
-    
-    print(f"\n� KẾT QUẢ CUỐI CÙNG:")
-    print(f"   • Epochs đã train: {args.epochs}")
-    print(f"   • F1 Score cuối: {train_metrics[-1]['max_f1']:.4f}")
-    print(f"   • EM Score cuối: {train_metrics[-1]['max_em']:.4f}")
-    print(f"   • Loss cuối: {train_metrics[-1]['avg_loss']:.4f}")
-    
-    print(f"\n🏆 MODEL TỐT NHẤT:")
-    print(f"   • Best F1: {best_f1:.4f}")
-    print(f"   • Best EM: {best_em:.4f}")
-    print(f"   • Đã lưu tại: {args.save_path}")
-    
-    # Tiến trình qua các epoch
-    if len(train_metrics) > 1:
-        print(f"\n📈 TIẾN TRÌNH QUA CÁC EPOCH:")
-        for i, metrics in enumerate(train_metrics):
-            epoch = metrics['epoch']
-            f1 = metrics['max_f1']
-            em = metrics['max_em']
-            is_best = f1 == best_f1
-            marker = "🌟" if is_best else "  "
-            print(f"   {marker} Epoch {epoch}: F1={f1:.4f}, EM={em:.4f}")
-    
-    # Hướng dẫn sử dụng model
-    print(f"\n� CÁCH SỬ DỤNG MODEL:")
-    print(f"   1. Model đã lưu tại: {args.save_path}")
-    print(f"   2. Để load model: ")
-    print(f"      checkpoint = torch.load('{args.save_path}')")
-    print(f"      model.load_state_dict(checkpoint['model_state_dict'])")
-    print(f"   3. Để đánh giá chi tiết:")
-    print(f"      python evaluate.py --model_path {args.save_path} --dataset dev --samples 100")
-    
-    # Tóm tắt dataset
-    dataset_summary = f"Dataset: {args.dataset.upper()}"
-    if args.dataset == 'dev':
-        dataset_summary += " (development data dùng cho training)"
-    
-    print(f"\n📚 THÔNG TIN TRAINING:")
-    print(f"   • {dataset_summary}")
-    print(f"   • Tổng samples: {len(train_data):,}")
-    print(f"   • Batch size: {args.batch_size}")
-    print(f"   • Learning rate: {args.learning_rate}")
-    print(f"   • Model: microsoft/deberta-v3-base + Focal Loss")
-    
-    print(f"\n💡 Ý NGHĨA METRICS:")
-    print(f"   • F1 Score: Đo độ overlap giữa predicted và target supporting facts")
-    print(f"   • EM Score: Exact Match - chỉ = 1.0 khi prediction khớp hoàn toàn")
-    print(f"   • Loss: CrossEntropy + Focal Loss để xử lý class imbalance")
-    if best_em == 0.0:
-        print(f"   • EM=0 là BÌNH THƯỜNG ở early training - model học partial patterns trước!")
+    final_avg_f1 = train_metrics[-1]['avg_f1'] if train_metrics else 0.0
+    final_avg_em = train_metrics[-1]['avg_em'] if train_metrics else 0.0
+    print(f"\nTraining hoàn thành!")
+    print(f"Best Max F1: {best_f1:.4f}, Best Max EM: {best_em:.4f}")
+    print(f"Final Avg F1: {final_avg_f1:.4f}, Final Avg EM: {final_avg_em:.4f}")
+    print(f"Model đã lưu tại: {args.save_path}")
 
 if __name__ == "__main__":
     main()
