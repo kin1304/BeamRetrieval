@@ -110,6 +110,25 @@ class Retriever(nn.Module):
         """Count trainable parameters"""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
     
+    def prepare_question_tokens(self, question_text: str):
+        """
+        Helper method to prepare clean question tokens from raw text
+        
+        Args:
+            question_text: Raw question text
+            
+        Returns:
+            torch.Tensor: Clean question tokens (without [CLS], [SEP], padding)
+        """
+        # Tokenize question without special tokens
+        question_tokens = self.tokenizer(
+            question_text,
+            add_special_tokens=False,
+            return_tensors='pt'
+        )['input_ids'].squeeze(0)
+        
+        return question_tokens
+    
     def _split_context_to_paragraphs(self, context_text: str, max_paragraph_len: int = 200):
         """
         Split context text into paragraphs for better processing
@@ -344,10 +363,15 @@ class Retriever(nn.Module):
         Forward pass with multi-hop reasoning using paragraph-based processing
         
         Pipeline:
-        1. Extract question tokens
-        2. Split each context into paragraphs  
-        3. Tokenize each paragraph separately
-        4. Apply multi-hop reasoning with proper concatenation
+        1. Split each context into paragraphs  
+        2. Tokenize each paragraph separately
+        3. Apply multi-hop reasoning with proper concatenation
+        
+        Args:
+            q_codes: List containing clean question tokens (without [CLS], [SEP], padding)
+            c_codes: List of context sequences [CLS] + Q + C + [SEP] for each context
+            sf_idx: Supporting fact indices 
+            hop: Number of hops for inference mode
         """
         device = q_codes[0].device
         total_loss = torch.tensor(0.0, device=device, requires_grad=True)
@@ -359,16 +383,9 @@ class Retriever(nn.Module):
         if self.use_focal:
             focal_loss_function = FocalLoss()
         
-        # STEP 1: Extract clean question tokens (without special tokens)
-        question_ids = q_codes[0]  # Reference question tokens
+        # STEP 1: Get clean question tokens (already preprocessed)
+        question_tokens = q_codes[0]  # Clean question tokens without special tokens
         context_sequences = c_codes  # Original: [CLS] + Q + C + [SEP] for each context
-        
-        # Clean question tokens (remove padding and special tokens)
-        question_tokens = question_ids[question_ids != self.tokenizer.pad_token_id]
-        if len(question_tokens) > 0 and question_tokens[0] == self.tokenizer.cls_token_id:
-            question_tokens = question_tokens[1:]  # Remove [CLS]
-        if len(question_tokens) > 0 and question_tokens[-1] == self.tokenizer.sep_token_id:
-            question_tokens = question_tokens[:-1]  # Remove [SEP]
         
         # STEP 2: Process contexts - extract and split into paragraphs
         context_paragraphs = []  # List of lists: each context -> list of paragraph tokens
@@ -404,7 +421,7 @@ class Retriever(nn.Module):
             
             context_paragraphs.append(paragraph_token_sequences)
         
-        # STEP 3: Determine training parameters
+        # STEP 2: Determine training parameters
         if self.training:
             sf_idx = sf_idx[0]
             hops = len(sf_idx)
@@ -417,7 +434,7 @@ class Retriever(nn.Module):
                 'loss': total_loss
             }
         
-        # STEP 4: Multi-hop reasoning
+        # STEP 3: Multi-hop reasoning
         current_preds = []  # Each beam tracks paragraph indices
         selected_paragraph_tokens = []  # Each beam tracks selected paragraph tokens
         

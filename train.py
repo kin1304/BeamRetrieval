@@ -116,27 +116,22 @@ class RetrievalDataset(Dataset):
                 question,
                 max_length=self.max_len // 2,
                 truncation=True,
-                add_special_tokens=False,
+                add_special_tokens=False,  # No [CLS], [SEP] for clean tokens
                 return_tensors='pt'
             )['input_ids'].view(-1)
             
-            # Format: [CLS] Q C [SEP] - use the combined tokens directly
-            # Extract question part for compatibility (first part of combined)
-            q_len = len(question_tokens) + 1  # +1 for CLS
-            question_part = input_ids[:q_len]
+            # Format: [CLS] Q C [SEP] - use the combined tokens directly for c_codes
+            # Extract clean question tokens (without special tokens) for q_codes
             
-            # Extract context part (remaining part)
-            context_part = input_ids[q_len:]
-            
-            # Pad question part to consistent length
+            # Pad question tokens to consistent length
             q_max_len = self.max_len // 2
-            if len(question_part) > q_max_len:
-                question_part = question_part[:q_max_len]
+            if len(question_tokens) > q_max_len:
+                question_tokens = question_tokens[:q_max_len]
             else:
-                padding_len = q_max_len - len(question_part)
-                question_part = torch.cat([question_part, torch.full((padding_len,), self.tokenizer.pad_token_id)])
+                padding_len = q_max_len - len(question_tokens)
+                question_tokens = torch.cat([question_tokens, torch.full((padding_len,), self.tokenizer.pad_token_id)])
             
-            q_tokens_list.append(question_part)
+            q_tokens_list.append(question_tokens)  # Clean question tokens only
             c_tokens_list.append(input_ids)  # Full sequence: [CLS] + Q + C + [SEP]
         
         # Supporting facts indices
@@ -155,8 +150,8 @@ class RetrievalDataset(Dataset):
             sf_indices.append(sf_indices[0])
         
         return {
-            'q_codes': q_tokens_list,  # List of question tokens for each context
-            'c_codes': c_tokens_list,  # List of full sequence tokens
+            'q_codes': q_tokens_list,  # List of CLEAN question tokens (no [CLS], [SEP], minimal padding)
+            'c_codes': c_tokens_list,  # List of full sequence tokens [CLS] + Q + C + [SEP]
             'sf_idx': [torch.tensor(sf_indices, dtype=torch.long)],
             'hop': len(sf_indices)
         }
