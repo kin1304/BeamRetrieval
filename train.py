@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """
-Main Training Script for Advanced Multi-Hop Retriever
-Usage: python train.py [--dataset train/dev] [--samples N] [--epochs N] [--batch_size N] [--gpu]
+Script Training Chính cho Advanced Multi-Hop Retriever
+Cách dùng: python tra                # Thêm nội dung còn lại
+                if current_paragraph.strip():
+                    paragraphs.append(current_paragraph.strip())
+        
+        # Lọc bỏ đoạn văn rỗng và đảm bảo nội dung tối thiểu
+        paragraphs = [p for p in paragraphs if len(p.strip()) > 10]
+        
+        # Đảm bảo ít nhất một đoạn văn
+        if not paragraphs:
+            paragraphs = [context_text[:max_len] if context_text else "Không có nội dung."]ataset train/dev] [--samples N] [--epochs N] [--batch_size N] [--gpu]
 """
 import argparse
 import sys
@@ -19,7 +28,7 @@ from models.advanced_retriever import create_advanced_retriever
 from utils.data_loader import load_hotpot_data
 
 def get_device():
-    """Get the best available device"""
+    """Lấy thiết bị tốt nhất có sẵn"""
     if torch.cuda.is_available():
         device = torch.device('cuda')
         print(f"🚀 Using GPU: {torch.cuda.get_device_name()}")
@@ -33,11 +42,11 @@ def get_device():
     return device
 
 def calculate_f1_em(predictions, targets):
-    """Calculate F1 score and Exact Match"""
+    """Tính toán F1 score và Exact Match"""
     if not predictions or not targets:
         return 0.0, 0.0
     
-    # Convert to sets for F1 calculation
+    # Chuyển đổi thành sets để tính F1
     pred_set = set(predictions)
     target_set = set(targets)
     
@@ -57,7 +66,7 @@ def calculate_f1_em(predictions, targets):
     return f1, em
 
 class RetrievalDataset(Dataset):
-    """Dataset for multi-hop retrieval training"""
+    """Dataset cho training multi-hop retrieval"""
     
     def __init__(self, data, tokenizer, max_len=256, num_contexts=5):
         self.data = data
@@ -68,13 +77,59 @@ class RetrievalDataset(Dataset):
     def __len__(self):
         return len(self.data)
     
+    def _split_context_to_paragraphs(self, context_text, max_len=200):
+        """
+        🚀 TỐI ƯU: Chia context thành đoạn văn trực tiếp từ raw text
+        Không có hiện tượng decode/re-tokenize kém hiệu quả!
+        """
+        paragraphs = []
+        
+        # Bước 1: Chia theo double newlines (ngắt đoạn văn tự nhiên)
+        parts = context_text.split('\n\n')
+        
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+                
+            if len(part) <= max_len:
+                paragraphs.append(part)
+            else:
+                # Bước 2: Chia các phần dài theo câu
+                sentences = part.split('. ')
+                current_paragraph = ""
+                
+                for sentence in sentences:
+                    # Kiểm tra việc thêm câu này có vượt quá max_len không
+                    test_paragraph = current_paragraph + sentence + ". " if current_paragraph else sentence + ". "
+                    
+                    if len(test_paragraph) > max_len and current_paragraph:
+                        # Lưu đoạn văn hiện tại và bắt đầu đoạn mới
+                        paragraphs.append(current_paragraph.strip())
+                        current_paragraph = sentence + ". "
+                    else:
+                        current_paragraph = test_paragraph
+                
+                # Thêm nội dung còn lại
+                if current_paragraph.strip():
+                    paragraphs.append(current_paragraph.strip())
+        
+        # Filter out empty paragraphs and ensure minimum content
+        paragraphs = [p for p in paragraphs if len(p.strip()) > 10]
+        
+        # Ensure at least one paragraph
+        if not paragraphs:
+            paragraphs = [context_text[:max_len] if context_text else "No content available."]
+        
+        return paragraphs
+    
     def __getitem__(self, idx):
         item = self.data[idx]
         question = item['question']
         contexts = item['contexts']
         supporting_facts = item.get('supporting_facts', [])
         
-        # Select contexts
+        # Chọn contexts
         if len(contexts) > self.num_contexts:
             sf_titles = {sf[0] for sf in supporting_facts}
             sf_contexts = [ctx for ctx in contexts if ctx['title'] in sf_titles]
@@ -87,92 +142,97 @@ class RetrievalDataset(Dataset):
         else:
             selected_contexts = contexts
         
-        # Pad contexts if needed
+        # Đệm contexts nếu cần
         while len(selected_contexts) < self.num_contexts:
-            selected_contexts.append({'title': 'Empty', 'text': 'No context available.'})
+            selected_contexts.append({'title': 'Empty', 'text': 'Không có context.'})
         
-        # Tokenize question and contexts together with proper format: [CLS] + Q + C + [SEP]
+        # 🚀 TỐI ƯU: Chia đoạn văn TRƯỚC khi tokenization (không decode/re-tokenize!)
         q_tokens_list = []
-        c_tokens_list = []
+        p_tokens_list = []  # Mới: chuỗi đoạn văn trực tiếp
+        context_to_paragraph_mapping = []  # Ánh xạ chỉ số đoạn văn tới chỉ số context gốc
         
-        for ctx in selected_contexts[:self.num_contexts]:
+        # Tokenize câu hỏi một lần (token sạch không có special tokens)
+        question_tokens = self.tokenizer(
+            question,
+            max_length=self.max_len // 2,
+            truncation=True,
+            add_special_tokens=False,  # Không có [CLS], [SEP] cho token sạch
+            return_tensors='pt'
+        )['input_ids'].view(-1)
+        
+        # Đệm question tokens tới độ dài nhất quán
+        q_max_len = self.max_len // 2
+        if len(question_tokens) > q_max_len:
+            question_tokens = question_tokens[:q_max_len]
+        else:
+            padding_len = q_max_len - len(question_tokens)
+            question_tokens = torch.cat([question_tokens, torch.full((padding_len,), self.tokenizer.pad_token_id)])
+        
+        # Xử lý từng context và chia thành đoạn văn
+        for ctx_idx, ctx in enumerate(selected_contexts[:self.num_contexts]):
             ctx_text = f"{ctx['title']}: {ctx['text']}"
             
-            # Create input with format: [CLS] + Q + C + [SEP] (no SEP between Q and C)
-            combined_text = question + " " + ctx_text
-            combined_tokens = self.tokenizer(
-                combined_text,
-                max_length=self.max_len,
-                truncation=True,
-                padding='max_length',
-                return_tensors='pt'
-            )
+            # Chia context thành đoạn văn TRƯỚC tokenization (không mất thông tin!)
+            paragraphs = self._split_context_to_paragraphs(ctx_text)
             
-            # Extract tokens for backward compatibility
-            input_ids = combined_tokens['input_ids'].view(-1)
-            
-            # For backward compatibility, split roughly at question length
-            question_tokens = self.tokenizer(
-                question,
-                max_length=self.max_len // 2,
-                truncation=True,
-                add_special_tokens=False,  # No [CLS], [SEP] for clean tokens
-                return_tensors='pt'
-            )['input_ids'].view(-1)
-            
-            # Format: [CLS] Q C [SEP] - use the combined tokens directly for c_codes
-            # Extract clean question tokens (without special tokens) for q_codes
-            
-            # Pad question tokens to consistent length
-            q_max_len = self.max_len // 2
-            if len(question_tokens) > q_max_len:
-                question_tokens = question_tokens[:q_max_len]
-            else:
-                padding_len = q_max_len - len(question_tokens)
-                question_tokens = torch.cat([question_tokens, torch.full((padding_len,), self.tokenizer.pad_token_id)])
-            
-            q_tokens_list.append(question_tokens)  # Clean question tokens only
-            c_tokens_list.append(input_ids)  # Full sequence: [CLS] + Q + C + [SEP]
+            # Tokenize từng đoạn văn trực tiếp: [CLS] + Q + P + [SEP]
+            for paragraph_text in paragraphs:
+                combined_text = question + " " + paragraph_text
+                para_tokens = self.tokenizer(
+                    combined_text,
+                    max_length=self.max_len,
+                    truncation=True,
+                    padding='max_length',
+                    return_tensors='pt'
+                )['input_ids'].view(-1)
+                
+                p_tokens_list.append(para_tokens)
+                context_to_paragraph_mapping.append(ctx_idx)
         
-        # Supporting facts indices
+        # Lưu question tokens một lần (dùng lại cho tất cả đoạn văn)
+        q_tokens_list.append(question_tokens)
+        
+        # Chỉ số supporting facts (ánh xạ tới chỉ số context gốc)
         sf_indices = []
         for i, ctx in enumerate(selected_contexts[:self.num_contexts]):
             if any(ctx['title'] == sf[0] for sf in supporting_facts):
                 sf_indices.append(i)
         
-        # Ensure at least 1 supporting fact
+        # Đảm bảo ít nhất 1 supporting fact
         if not sf_indices:
             sf_indices.append(0)
-        sf_indices = sf_indices[:3]  # Max 3 supporting facts
+        sf_indices = sf_indices[:3]  # Tối đa 3 supporting facts
         
-        # Pad to ensure consistent length
+        # Đệm để đảm bảo độ dài nhất quán
         while len(sf_indices) < 2:
             sf_indices.append(sf_indices[0])
         
         return {
-            'q_codes': q_tokens_list,  # List of CLEAN question tokens (no [CLS], [SEP], minimal padding)
-            'c_codes': c_tokens_list,  # List of full sequence tokens [CLS] + Q + C + [SEP]
+            'q_codes': q_tokens_list,  # Token câu hỏi sạch đơn (không có [CLS], [SEP])
+            'p_codes': p_tokens_list,  # MỚI: Chuỗi đoạn văn trực tiếp [CLS] + Q + P + [SEP]
+            'context_mapping': context_to_paragraph_mapping,  # MỚI: Ánh xạ Đoạn văn → Context
             'sf_idx': [torch.tensor(sf_indices, dtype=torch.long)],
             'hop': len(sf_indices)
         }
 
 def collate_fn(batch):
-    """Custom collate function"""
+    """🚀 TỐI ƯU: Hàm collate tùy chỉnh cho định dạng paragraph-based mới"""
     return {
         'q_codes': [item['q_codes'] for item in batch],
-        'c_codes': [item['c_codes'] for item in batch],
+        'p_codes': [item['p_codes'] for item in batch],  # MỚI: Chuỗi đoạn văn
+        'context_mapping': [item['context_mapping'] for item in batch],  # MỚI: Ánh xạ Đoạn văn → Context
         'sf_idx': [item['sf_idx'] for item in batch],
         'hops': [item['hop'] for item in batch]
     }
 
 def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=None):
-    """Train for one epoch with GPU optimization"""
+    """Train một epoch với tối ưu hóa GPU"""
     model.train()
     epoch_losses = []
     f1_scores = []
     em_scores = []
     
-    # Calculate 30% checkpoint for reporting
+    # Tính toán checkpoint 30% để báo cáo
     total_batches = max_batches if max_batches else len(dataloader)
     checkpoint_30_percent = int(total_batches * 0.3)
     
@@ -183,29 +243,31 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
         batch_em = 0
         valid_samples = 0
         
-        # Process each sample in batch individually
+        # Xử lý từng sample trong batch riêng lẻ
         for i in range(len(batch['q_codes'])):
             try:
-                # Zero gradients for each sample
+                # Zero gradients cho từng sample
                 optimizer.zero_grad()
                 
-                # Move data to device efficiently
+                # 🚀 TỐI ƯU: Di chuyển dữ liệu lên device hiệu quả (định dạng mới)
                 q_codes = [q.to(device, non_blocking=True) for q in batch['q_codes'][i]]
-                c_codes = [c.to(device, non_blocking=True) for c in batch['c_codes'][i]]
+                p_codes = [p.to(device, non_blocking=True) for p in batch['p_codes'][i]]  # MỚI: Chuỗi đoạn văn
+                context_mapping = batch['context_mapping'][i]  # MỚI: Thông tin ánh xạ
                 sf_idx = [s.to(device, non_blocking=True) for s in batch['sf_idx'][i]]
                 hop = batch['hops'][i]
                 
                 # Mixed precision forward pass
                 if scaler is not None:
                     with torch.cuda.amp.autocast():
-                        outputs = model(q_codes, c_codes, sf_idx, hop)
+                        # 🚀 TỐI ƯU: Sử dụng p_codes (chuỗi đoạn văn) và context_mapping
+                        outputs = model(q_codes, p_codes, sf_idx, hop, context_mapping=context_mapping)
                         loss = outputs['loss']
                 else:
-                    outputs = model(q_codes, c_codes, sf_idx, hop)
+                    outputs = model(q_codes, p_codes, sf_idx, hop, context_mapping=context_mapping)
                     loss = outputs['loss']
                 
                 if loss.requires_grad and not torch.isnan(loss):
-                    # Backward pass for individual sample
+                    # Backward pass cho sample riêng lẻ
                     if scaler is not None:
                         scaler.scale(loss).backward()
                         scaler.step(optimizer)
@@ -217,31 +279,35 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
                     valid_samples += 1
                     epoch_losses.append(loss.item())
                     
-                    # Calculate F1 and EM only after ALL hops are completed
+                    # Tính toán F1 và EM chỉ sau khi TẤT CẢ hops đã hoàn thành
+                    predictions = []
+                    targets = sf_idx[0].cpu().tolist()
+                    
                     if 'final_preds' in outputs and outputs['final_preds']:
-                        # Use final predictions after all hops are completed
-                        final_predictions = outputs['final_preds'][0] if outputs['final_preds'][0] else []
-                        targets = sf_idx[0].cpu().tolist()
-                        
-                        f1, em = calculate_f1_em(final_predictions, targets)
-                        batch_f1 += f1
-                        batch_em += em
-                        f1_scores.append(f1)
-                        em_scores.append(em)
+                        # Sử dụng final predictions sau khi tất cả hops hoàn thành
+                        predictions = outputs['final_preds'][0] if len(outputs['final_preds']) > 0 else []
                         
                     elif 'current_preds' in outputs and outputs['current_preds']:
-                        # Fallback to current predictions if final not available
-                        predictions = outputs['current_preds'][0] if outputs['current_preds'][0] else []
-                        targets = sf_idx[0].cpu().tolist()
-                        
-                        f1, em = calculate_f1_em(predictions, targets)
-                        batch_f1 += f1
-                        batch_em += em
-                        f1_scores.append(f1)
-                        em_scores.append(em)
+                        # Fallback tới current predictions nếu final không có
+                        predictions = outputs['current_preds'][0] if len(outputs['current_preds']) > 0 else []
+                    
+                    # Luôn tính F1/EM kể cả khi predictions rỗng (để debug)
+                    f1, em = calculate_f1_em(predictions, targets)
+                    batch_f1 += f1
+                    batch_em += em
+                    f1_scores.append(f1)
+                    em_scores.append(em)
+                    
+                    # Thông tin debug cho vài sample đầu
+                    if len(f1_scores) <= 3:
+                        print(f"\n🔍 Debug Sample {len(f1_scores)}:")
+                        print(f"   Predictions: {predictions}")
+                        print(f"   Targets: {targets}")
+                        print(f"   F1: {f1:.4f}, EM: {em:.4f}")
+                        print(f"   Available outputs: {list(outputs.keys())}")
                     
             except Exception as e:
-                print(f"Sample {i} failed: {e}")
+                print(f"Sample {i} thất bại: {e}")
                 continue
         
         if valid_samples > 0:
@@ -255,11 +321,11 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
                 'valid': f'{valid_samples}/{len(batch["q_codes"])}'
             })
         
-        # Clear GPU cache periodically
+        # Xóa GPU cache định kỳ
         if torch.cuda.is_available() and batch_idx % 10 == 0:
             torch.cuda.empty_cache()
         
-        # Report metrics at 30% checkpoint
+        # Báo cáo metrics tại checkpoint 30%
         if batch_idx == checkpoint_30_percent and f1_scores and em_scores:
             current_avg_f1 = sum(f1_scores) / len(f1_scores)
             current_avg_em = sum(em_scores) / len(em_scores)
@@ -271,7 +337,7 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
             print(f"   Max F1 so far: {max(f1_scores):.4f}")
             print(f"   Max EM so far: {max(em_scores):.4f}")
         
-        # Early break if max_batches specified
+        # Dừng sớm nếu max_batches được chỉ định
         if max_batches and batch_idx >= max_batches - 1:
             break
     
@@ -282,25 +348,25 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
     return max_f1, max_em, avg_loss
 
 def main():
-    parser = argparse.ArgumentParser(description='Train Advanced Multi-Hop Retriever - Paper Configuration')
-    # ========== PAPER CONFIGURATION (DEFAULT VALUES) ==========
+    parser = argparse.ArgumentParser(description='Train Advanced Multi-Hop Retriever - Cấu hình Paper')
+    # ========== CẤU HÌNH PAPER (GIÁ TRỊ MẶC ĐỊNH) ==========
     parser.add_argument('--dataset', type=str, default='train', choices=['train', 'dev'], 
-                       help='Dataset to use for training (train or dev)')
-    parser.add_argument('--samples', type=int, default=None, help='Number of training samples (None = FULL DATASET)')
-    parser.add_argument('--epochs', type=int, default=2, help='Number of epochs (Paper: 16, Test: 2)')
-    parser.add_argument('--batch_size', type=int, default=1, help='Batch size (Paper: 1)')
+                       help='Dataset sử dụng cho training (train hoặc dev)')
+    parser.add_argument('--samples', type=int, default=None, help='Số lượng training samples (None = FULL DATASET)')
+    parser.add_argument('--epochs', type=int, default=2, help='Số epochs (Paper: 16, Test: 2)')
+    parser.add_argument('--batch_size', type=int, default=1, help='Kích thước batch (Paper: 1)')
     parser.add_argument('--learning_rate', type=float, default=2e-5, help='Learning rate (Paper: 2e-5)')
-    parser.add_argument('--max_len', type=int, default=512, help='Max sequence length (Paper: 512)')
-    parser.add_argument('--save_path', type=str, default='models/deberta_v3_paper_full.pt', help='Model save path')
-    parser.add_argument('--gradient_accumulation', type=int, default=1, help='Gradient accumulation steps')
-    parser.add_argument('--max_batches', type=int, default=None, help='Max batches per epoch (None = FULL DATASET)')
-    parser.add_argument('--gpu', action='store_true', help='Force GPU usage')
-    parser.add_argument('--mixed_precision', action='store_true', default=False, help='Use mixed precision (typically False with gradient checkpointing)')
-    parser.add_argument('--gradient_checkpointing', action='store_true', default=False, help='Use gradient checkpointing for memory efficiency (recommended)')
+    parser.add_argument('--max_len', type=int, default=512, help='Độ dài chuỗi tối đa (Paper: 512)')
+    parser.add_argument('--save_path', type=str, default='models/deberta_v3_paper_full.pt', help='Đường dẫn lưu model')
+    parser.add_argument('--gradient_accumulation', type=int, default=1, help='Bước tích lũy gradient')
+    parser.add_argument('--max_batches', type=int, default=None, help='Số batch tối đa mỗi epoch (None = FULL DATASET)')
+    parser.add_argument('--gpu', action='store_true', help='Ép buộc sử dụng GPU')
+    parser.add_argument('--mixed_precision', action='store_true', default=False, help='Sử dụng mixed precision (thường False với gradient checkpointing)')
+    parser.add_argument('--gradient_checkpointing', action='store_true', default=False, help='Sử dụng gradient checkpointing để tiết kiệm bộ nhớ (khuyến nghị)')
     
     args = parser.parse_args()
     
-    # Display configuration based on dataset
+    # Hiển thị cấu hình dựa trên dataset
     dataset_info = {
         'train': ('FULL HOTPOT QA TRAIN (~90K samples)', 'training'),
         'dev': ('FULL HOTPOT QA DEV (~7.4K samples)', 'development/validation')
@@ -308,32 +374,32 @@ def main():
     
     dataset_name, dataset_purpose = dataset_info[args.dataset]
     
-    print(f"📖 TRAINING ON {args.dataset.upper()} SET")
+    print(f"📖 TRAINING TRÊN {args.dataset.upper()} SET")
     print("=" * 60)
     print(f"📊 Dataset: {dataset_name if args.samples is None else f'{args.samples} {args.dataset} samples'}")
-    print(f"🎯 Purpose: Using {dataset_purpose} data for training")
+    print(f"🎯 Mục đích: Sử dụng dữ liệu {dataset_purpose} cho training")
     if args.dataset == 'dev':
-        print(f"⚠️  NOTE: Training on DEV set - typically used for testing/validation")
-        print(f"📈 This can be useful for quick experiments or debugging")
+        print(f"⚠️  LƯU Ý: Training trên DEV set - thường dùng cho testing/validation")
+        print(f"📈 Có thể hữu ích cho thí nghiệm nhanh hoặc debug")
     print(f"🔄 Epochs: {args.epochs} {'✅ (Paper: 16)' if args.epochs == 16 else '⚠️ (Paper: 16)'}")
     print(f"📦 Batch size: {args.batch_size} {'✅ (Paper: 1)' if args.batch_size == 1 else '⚠️ (Paper: 1)'}")
     print(f"🎯 Learning rate: {args.learning_rate} {'✅ (Paper: 2e-5)' if args.learning_rate == 2e-5 else '⚠️ (Paper: 2e-5)'}")
     print(f"📏 Max length: {args.max_len} {'✅ (Paper: 512)' if args.max_len == 512 else '⚠️ (Paper: 512)'}")
     print(f"⚡ Mixed precision: {args.mixed_precision}")
     print(f"🔄 Gradient checkpointing: {args.gradient_checkpointing}")
-    print(f"🔢 Max batches: {'UNLIMITED' if args.max_batches is None else args.max_batches}")
+    print(f"🔢 Max batches: {'KHÔNG GIỚI HẠN' if args.max_batches is None else args.max_batches}")
     
-    # Auto-adjust save path based on dataset
-    if args.save_path == 'models/deberta_v3_paper_full.pt':  # Default path
+    # Tự động điều chỉnh đường dẫn lưu dựa trên dataset
+    if args.save_path == 'models/deberta_v3_paper_full.pt':  # Đường dẫn mặc định
         if args.dataset == 'dev':
             args.save_path = 'models/deberta_v3_paper_dev.pt'
         else:
             args.save_path = 'models/deberta_v3_paper_train.pt'
     
-    print(f"💾 Save path: {args.save_path}")
+    print(f"💾 Đường dẫn lưu: {args.save_path}")
     print("=" * 60)
     
-    # Paper compliance check
+    # Kiểm tra tuân thủ paper
     is_paper_config = (
         args.samples is None and
         args.epochs == 16 and
@@ -343,27 +409,27 @@ def main():
     )
     
     if is_paper_config:
-        print(f"🎉 EXACT PAPER CONFIGURATION DETECTED! (using {args.dataset.upper()} set)")
-        print(f"📖 Training with exact settings from the paper on {args.dataset} data")
+        print(f"🎉 PHÁT HIỆN CẤU HÌNH PAPER CHÍNH XÁC! (sử dụng {args.dataset.upper()} set)")
+        print(f"📖 Training với cài đặt chính xác từ paper trên dữ liệu {args.dataset}")
     else:
-        print("⚠️  Custom configuration - differs from paper settings")
-        print("📝 To use exact paper config, run without arguments")
+        print("⚠️  Cấu hình tùy chỉnh - khác với cài đặt paper")
+        print("📝 Để sử dụng cấu hình paper chính xác, chạy không có arguments")
     print("=" * 60)
     
-    # Device selection
+    # Lựa chọn thiết bị
     device = get_device()
     if args.gpu and not torch.cuda.is_available():
-        print("⚠️  GPU requested but not available, using CPU")
+        print("⚠️  Yêu cầu GPU nhưng không có sẵn, sử dụng CPU")
     
-    # Load data - using the selected dataset
-    print(f"\n📚 Loading {args.dataset.upper()} data for training...")
+    # Tải dữ liệu - sử dụng dataset đã chọn
+    print(f"\n📚 Đang tải dữ liệu {args.dataset.upper()} cho training...")
     train_data = load_hotpot_data(args.dataset, sample_size=args.samples)
-    print(f"✅ Loaded {len(train_data)} {args.dataset.upper()} samples for training")
+    print(f"✅ Đã tải {len(train_data)} {args.dataset.upper()} samples cho training")
     if args.dataset == 'dev':
-        print(f"⚠️  NOTE: Using DEV set as training data!")
+        print(f"⚠️  LƯU Ý: Sử dụng DEV set làm dữ liệu training!")
     
-    # Create model
-    print("\n🧠 Creating model...")
+    # Tạo model
+    print("\n🧠 Đang tạo model...")
     model = create_advanced_retriever(
         model_name="microsoft/deberta-v3-base",
         beam_size=2,
@@ -373,20 +439,20 @@ def main():
         gradient_checkpointing=args.gradient_checkpointing
     )
     model.to(device)
-    print(f"✅ Model created with {model.count_parameters():,} parameters")
+    print(f"✅ Model đã tạo với {model.count_parameters():,} parameters")
     
-    # Mixed precision setup
+    # Thiết lập mixed precision
     scaler = None
     if args.mixed_precision and torch.cuda.is_available():
         scaler = torch.cuda.amp.GradScaler()
-        print("⚡ Using mixed precision training")
+        print("⚡ Sử dụng mixed precision training")
     
-    # Create dataset and dataloader
-    print("\n📦 Creating dataset...")
+    # Tạo dataset và dataloader
+    print("\n📦 Đang tạo dataset...")
     tokenizer = model.tokenizer
     dataset = RetrievalDataset(train_data, tokenizer, max_len=args.max_len, num_contexts=5)
     
-    # Pin memory for faster GPU transfer
+    # Pin memory để chuyển GPU nhanh hơn
     pin_memory = torch.cuda.is_available()
     num_workers = 2 if torch.cuda.is_available() else 0
     
@@ -399,7 +465,7 @@ def main():
         num_workers=num_workers
     )
     
-    # Optimizer with better settings for GPU
+    # Optimizer với cài đặt tốt hơn cho GPU
     optimizer = torch.optim.AdamW(
         model.parameters(), 
         lr=args.learning_rate, 
@@ -408,10 +474,10 @@ def main():
         betas=(0.9, 0.999)
     )
     
-    # Training loop
-    print(f"\n🎯 Starting training for {args.epochs} epochs...")
+    # Vòng lặp training
+    print(f"\n🎯 Bắt đầu training cho {args.epochs} epochs...")
     if torch.cuda.is_available():
-        print(f"🔥 GPU Memory before training: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
+        print(f"🔥 GPU Memory trước khi training: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
     
     best_f1 = 0.0
     best_em = 0.0
@@ -420,9 +486,9 @@ def main():
     for epoch in range(args.epochs):
         print(f"\n📚 Epoch {epoch+1}/{args.epochs}")
         
-        # GPU memory info
+        # Thông tin GPU memory
         if torch.cuda.is_available():
-            print(f"🔥 GPU Memory before epoch: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
+            print(f"🔥 GPU Memory trước epoch: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
         
         max_f1, max_em, avg_loss = train_epoch(
             model=model,
@@ -442,11 +508,11 @@ def main():
         
         print(f"📊 Epoch {epoch+1} - Max F1: {max_f1:.4f}, Max EM: {max_em:.4f}, Avg Loss: {avg_loss:.4f}")
         
-        # GPU memory info
+        # Thông tin GPU memory
         if torch.cuda.is_available():
-            print(f"🔥 GPU Memory after epoch: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
+            print(f"🔥 GPU Memory sau epoch: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
         
-        # Save model if F1 improves
+        # Lưu model nếu F1 cải thiện
         if max_f1 > best_f1:
             best_f1 = max_f1
             best_em = max_em
@@ -470,31 +536,31 @@ def main():
                     'learning_rate': args.learning_rate
                 }
             }, args.save_path)
-            print(f"💾 Best model saved to {args.save_path} (F1: {max_f1:.4f}, EM: {max_em:.4f})")
-            print(f"📈 F1 improvement: {max_f1:.4f}")
+            print(f"💾 Model tốt nhất đã lưu vào {args.save_path} (F1: {max_f1:.4f}, EM: {max_em:.4f})")
+            print(f"📈 Cải thiện F1: {max_f1:.4f}")
         
-        # Explain why EM might be 0
+        # Giải thích tại sao EM có thể bằng 0
         if max_em == 0.0:
-            print(f"❗ EM = 0 means: No exact match between predicted and target supporting facts")
-            print(f"   - F1 > 0 means partial overlap exists (some correct predictions)")
-            print(f"   - This is normal in early training - model learns partial patterns first")
+            print(f"❗ EM = 0 nghĩa là: Không có exact match giữa predicted và target supporting facts")
+            print(f"   - F1 > 0 nghĩa là có overlap một phần (một số dự đoán đúng)")
+            print(f"   - Điều này bình thường trong early training - model học partial patterns trước")
     
-    print(f"\n🎉 Training completed!")
-    print(f"📈 Final metrics - F1: {train_metrics[-1]['max_f1']:.4f}, EM: {train_metrics[-1]['max_em']:.4f}")
-    print(f"🏆 Best F1: {best_f1:.4f}, Best EM: {best_em:.4f}")
-    print(f"💾 Model saved to {args.save_path}")
+    print(f"\n🎉 Training hoàn thành!")
+    print(f"📈 Metrics cuối - F1: {train_metrics[-1]['max_f1']:.4f}, EM: {train_metrics[-1]['max_em']:.4f}")
+    print(f"🏆 F1 tốt nhất: {best_f1:.4f}, EM tốt nhất: {best_em:.4f}")
+    print(f"💾 Model đã lưu vào {args.save_path}")
     
-    # Dataset summary
-    dataset_summary = f"Trained on {args.dataset.upper()} set"
+    # Tóm tắt dataset
+    dataset_summary = f"Trained trên {args.dataset.upper()} set"
     if args.dataset == 'dev':
-        dataset_summary += " (development data used for training)"
+        dataset_summary += " (dữ liệu development được dùng cho training)"
     
-    print(f"\n📚 Training Summary:")
+    print(f"\n📚 Tóm tắt Training:")
     print(f"• Dataset: {dataset_summary}")
     print(f"• Samples: {len(train_data):,}")
-    print(f"• F1 Score: Measures partial overlap between predicted and target supporting facts")
-    print(f"• EM Score: Exact Match - 1.0 only when predictions exactly match targets")
-    print(f"• Why EM=0? Model is learning gradually - partial matches (F1>0) come before exact matches")
+    print(f"• F1 Score: Đo overlap một phần giữa predicted và target supporting facts")
+    print(f"• EM Score: Exact Match - 1.0 chỉ khi predictions khớp chính xác với targets")
+    print(f"• Tại sao EM=0? Model đang học dần dần - partial matches (F1>0) xuất hiện trước exact matches")
 
 if __name__ == "__main__":
     main()
