@@ -597,11 +597,26 @@ def create_advanced_retriever(model_name="microsoft/deberta-v3-small", **kwargs)
     """
     try:
         config = AutoConfig.from_pretrained(model_name)
+        
+        # Lọc bỏ các arguments không hợp lệ cho Retriever
+        valid_args = {}
+        retriever_params = {
+            'encoder_class', 'max_seq_len', 'mean_passage_len', 
+            'beam_size', 'gradient_checkpointing', 'use_focal', 'use_early_stop'
+        }
+        
+        for key, value in kwargs.items():
+            if key in retriever_params:
+                valid_args[key] = value
+        
+        # Đảm bảo có beam_size mặc định
+        if 'beam_size' not in valid_args:
+            valid_args['beam_size'] = 2
+        
         model = Retriever(
+            config=config,
             model_name=model_name,
-            num_labels=kwargs.get('num_labels', 2),
-            beam_size=kwargs.get('beam_size', 5),
-            **{k: v for k, v in kwargs.items() if k not in ['num_labels', 'beam_size']}
+            **valid_args
         )
         return model
     except Exception as e:
