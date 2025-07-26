@@ -202,7 +202,7 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
                 
                 # Mixed precision forward pass
                 if scaler is not None:
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast('cuda'):
                         outputs = model(q_codes, c_codes, sf_idx, hop)
                         loss = outputs['loss']
                 else:
@@ -389,11 +389,14 @@ def main():
     # Create dataset and dataloader
     print("\n📦 Creating dataset...")
     tokenizer = model.tokenizer
-    dataset = RetrievalDataset(train_data, tokenizer, max_len=args.max_len, num_contexts=5)
+    # FULL CONTEXT PROCESSING: Use all 10 contexts from HotpotQA dataset
+    num_contexts = 10  # HotpotQA provides 10 contexts per sample - use them all
+    print(f"🔧 Using {num_contexts} contexts per sample for FULL context processing")
+    dataset = RetrievalDataset(train_data, tokenizer, max_len=args.max_len, num_contexts=num_contexts)
     
-    # Pin memory for faster GPU transfer
-    pin_memory = torch.cuda.is_available()
-    num_workers = 2 if torch.cuda.is_available() else 0
+    # Memory optimization for 10 contexts - disable pin_memory and multiprocessing
+    pin_memory = False  # Disable to save GPU memory
+    num_workers = 0  # Disable multiprocessing to save memory
     
     dataloader = DataLoader(
         dataset, 
