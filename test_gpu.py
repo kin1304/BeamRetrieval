@@ -4,8 +4,13 @@ GPU Test Script - Check GPU/CUDA availability and performance
 """
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import time
-from transformers import AutoTokenizer, AutoModel
+import random
+import os
+import sys
+from transformers import DebertaV2Tokenizer, AutoModel
 
 def test_gpu_setup():
     """Test GPU setup and availability"""
@@ -48,7 +53,7 @@ def test_model_loading(device):
     try:
         # Load tokenizer and model
         model_name = "microsoft/deberta-v3-base"
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tokenizer = DebertaV2Tokenizer.from_pretrained(model_name)
         model = AutoModel.from_pretrained(model_name)
         
         # Move to device
