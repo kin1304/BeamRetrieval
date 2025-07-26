@@ -326,17 +326,33 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
         if torch.cuda.is_available() and batch_idx % 10 == 0:
             torch.cuda.empty_cache()
         
-        # Báo cáo metrics tại checkpoint 30%
-        if batch_idx == checkpoint_30_percent and f1_scores and em_scores:
+        # Báo cáo metrics theo chu kỳ (mỗi 25% và 50%)
+        if f1_scores and em_scores:
             current_avg_f1 = sum(f1_scores) / len(f1_scores)
             current_avg_em = sum(em_scores) / len(em_scores)
             current_avg_loss = sum(epoch_losses) / len(epoch_losses)
-            print(f"\n📊 30% Checkpoint ({batch_idx+1}/{total_batches} batches):")
-            print(f"   Average Loss: {current_avg_loss:.4f}")
-            print(f"   Average F1: {current_avg_f1:.4f}")
-            print(f"   Average EM: {current_avg_em:.4f}")
-            print(f"   Max F1 so far: {max(f1_scores):.4f}")
-            print(f"   Max EM so far: {max(em_scores):.4f}")
+            current_max_f1 = max(f1_scores)
+            current_max_em = max(em_scores)
+            
+            # Báo cáo tại 25%, 50%, 75% 
+            progress_checkpoints = [int(total_batches * p) for p in [0.25, 0.5, 0.75]]
+            
+            if batch_idx in progress_checkpoints:
+                progress_pct = int((batch_idx / total_batches) * 100)
+                print(f"\n🎯 {progress_pct}% Progress ({batch_idx+1}/{total_batches} batches)")
+                print(f"📊 METRICS HIỆN TẠI:")
+                print(f"   • Loss: {current_avg_loss:.4f}")
+                print(f"   • F1 Avg: {current_avg_f1:.4f} | Max: {current_max_f1:.4f}")
+                print(f"   • EM Avg: {current_avg_em:.4f} | Max: {current_max_em:.4f}")
+                print(f"   • Samples với EM=1.0: {sum(1 for em in em_scores if em == 1.0)}/{len(em_scores)}")
+                
+                # Phân tích phân bố F1
+                high_f1 = sum(1 for f1 in f1_scores if f1 >= 0.5)
+                perfect_f1 = sum(1 for f1 in f1_scores if f1 == 1.0)
+                print(f"   • F1≥0.5: {high_f1}/{len(f1_scores)} | F1=1.0: {perfect_f1}/{len(f1_scores)}")
+                
+                if torch.cuda.is_available():
+                    print(f"   • GPU Memory: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
         
         # Dừng sớm nếu max_batches được chỉ định
         if max_batches and batch_idx >= max_batches - 1:
@@ -509,11 +525,35 @@ def main():
             'avg_loss': avg_loss
         })
         
-        print(f"📊 Epoch {epoch+1} - Max F1: {max_f1:.4f}, Max EM: {max_em:.4f}, Avg Loss: {avg_loss:.4f}")
+        print(f"\n🎉 EPOCH {epoch+1} HOÀN THÀNH!")
+        print(f"=" * 60)
+        print(f"📊 KẾT QUẢ EPOCH {epoch+1}:")
+        print(f"   • Max F1 Score: {max_f1:.4f}")
+        print(f"   • Max EM Score: {max_em:.4f}")
+        print(f"   • Average Loss: {avg_loss:.4f}")
+        
+        # So sánh với epoch trước
+        if len(train_metrics) > 1:
+            prev_f1 = train_metrics[-2]['max_f1']
+            prev_em = train_metrics[-2]['max_em']
+            f1_change = max_f1 - prev_f1
+            em_change = max_em - prev_em
+            
+            print(f"📈 SO VỚI EPOCH TRƯỚC:")
+            print(f"   • F1 thay đổi: {f1_change:+.4f} {'📈' if f1_change > 0 else '📉' if f1_change < 0 else '➡️'}")
+            print(f"   • EM thay đổi: {em_change:+.4f} {'📈' if em_change > 0 else '📉' if em_change < 0 else '➡️'}")
+        
+        # Hiển thị trạng thái model tốt nhất
+        print(f"🏆 BEST MODEL SO FAR:")
+        print(f"   • Best F1: {best_f1:.4f}")
+        print(f"   • Best EM: {best_em:.4f}")
         
         # Thông tin GPU memory
         if torch.cuda.is_available():
-            print(f"🔥 GPU Memory sau epoch: {torch.cuda.memory_allocated()/1024**2:.1f}MB")
+            gpu_mem = torch.cuda.memory_allocated()/1024**2
+            gpu_max = torch.cuda.max_memory_allocated()/1024**2
+            print(f"🔥 GPU Memory: {gpu_mem:.1f}MB (Max: {gpu_max:.1f}MB)")
+            torch.cuda.reset_peak_memory_stats()
         
         # Lưu model nếu F1 cải thiện
         if max_f1 > best_f1:
@@ -539,31 +579,74 @@ def main():
                     'learning_rate': args.learning_rate
                 }
             }, args.save_path)
-            print(f"💾 Model tốt nhất đã lưu vào {args.save_path} (F1: {max_f1:.4f}, EM: {max_em:.4f})")
-            print(f"📈 Cải thiện F1: {max_f1:.4f}")
+            print(f"💾 🌟 MODEL MỚI TỐT NHẤT! Đã lưu vào {args.save_path}")
+            print(f"📈 F1 Score cải thiện: {best_f1:.4f} (tăng {max_f1 - (train_metrics[-2]['max_f1'] if len(train_metrics) > 1 else 0):.4f})")
+        else:
+            print(f"� Model hiện tại chưa vượt qua best F1: {best_f1:.4f}")
         
-        # Giải thích tại sao EM có thể bằng 0
-        if max_em == 0.0:
-            print(f"❗ EM = 0 nghĩa là: Không có exact match giữa predicted và target supporting facts")
-            print(f"   - F1 > 0 nghĩa là có overlap một phần (một số dự đoán đúng)")
-            print(f"   - Điều này bình thường trong early training - model học partial patterns trước")
+        # Giải thích metrics cho người dùng
+        if max_em == 0.0 and max_f1 > 0.0:
+            print(f"\n💡 GIẢI THÍCH METRICS:")
+            print(f"   • F1 = {max_f1:.4f} > 0: Model đã học được một số patterns ✅")
+            print(f"   • EM = 0: Chưa có prediction nào khớp hoàn toàn với target")
+            print(f"   • Điều này BÌNH THƯỜNG ở early epochs - model học partial matches trước!")
+        elif max_em > 0.0:
+            print(f"\n� GREAT! Model đã có {max_em:.1%} exact matches!")
     
-    print(f"\n🎉 Training hoàn thành!")
-    print(f"📈 Metrics cuối - F1: {train_metrics[-1]['max_f1']:.4f}, EM: {train_metrics[-1]['max_em']:.4f}")
-    print(f"🏆 F1 tốt nhất: {best_f1:.4f}, EM tốt nhất: {best_em:.4f}")
-    print(f"💾 Model đã lưu vào {args.save_path}")
+    # Tóm tắt cuối training
+    print(f"\n" + "🎉" * 20)
+    print(f"🏁 TRAINING HOÀN THÀNH!")
+    print(f"🎉" * 20)
+    
+    print(f"\n� KẾT QUẢ CUỐI CÙNG:")
+    print(f"   • Epochs đã train: {args.epochs}")
+    print(f"   • F1 Score cuối: {train_metrics[-1]['max_f1']:.4f}")
+    print(f"   • EM Score cuối: {train_metrics[-1]['max_em']:.4f}")
+    print(f"   • Loss cuối: {train_metrics[-1]['avg_loss']:.4f}")
+    
+    print(f"\n🏆 MODEL TỐT NHẤT:")
+    print(f"   • Best F1: {best_f1:.4f}")
+    print(f"   • Best EM: {best_em:.4f}")
+    print(f"   • Đã lưu tại: {args.save_path}")
+    
+    # Tiến trình qua các epoch
+    if len(train_metrics) > 1:
+        print(f"\n📈 TIẾN TRÌNH QUA CÁC EPOCH:")
+        for i, metrics in enumerate(train_metrics):
+            epoch = metrics['epoch']
+            f1 = metrics['max_f1']
+            em = metrics['max_em']
+            is_best = f1 == best_f1
+            marker = "🌟" if is_best else "  "
+            print(f"   {marker} Epoch {epoch}: F1={f1:.4f}, EM={em:.4f}")
+    
+    # Hướng dẫn sử dụng model
+    print(f"\n� CÁCH SỬ DỤNG MODEL:")
+    print(f"   1. Model đã lưu tại: {args.save_path}")
+    print(f"   2. Để load model: ")
+    print(f"      checkpoint = torch.load('{args.save_path}')")
+    print(f"      model.load_state_dict(checkpoint['model_state_dict'])")
+    print(f"   3. Để đánh giá chi tiết:")
+    print(f"      python evaluate.py --model_path {args.save_path} --dataset dev --samples 100")
     
     # Tóm tắt dataset
-    dataset_summary = f"Trained trên {args.dataset.upper()} set"
+    dataset_summary = f"Dataset: {args.dataset.upper()}"
     if args.dataset == 'dev':
-        dataset_summary += " (dữ liệu development được dùng cho training)"
+        dataset_summary += " (development data dùng cho training)"
     
-    print(f"\n📚 Tóm tắt Training:")
-    print(f"• Dataset: {dataset_summary}")
-    print(f"• Samples: {len(train_data):,}")
-    print(f"• F1 Score: Đo overlap một phần giữa predicted và target supporting facts")
-    print(f"• EM Score: Exact Match - 1.0 chỉ khi predictions khớp chính xác với targets")
-    print(f"• Tại sao EM=0? Model đang học dần dần - partial matches (F1>0) xuất hiện trước exact matches")
+    print(f"\n📚 THÔNG TIN TRAINING:")
+    print(f"   • {dataset_summary}")
+    print(f"   • Tổng samples: {len(train_data):,}")
+    print(f"   • Batch size: {args.batch_size}")
+    print(f"   • Learning rate: {args.learning_rate}")
+    print(f"   • Model: microsoft/deberta-v3-base + Focal Loss")
+    
+    print(f"\n💡 Ý NGHĨA METRICS:")
+    print(f"   • F1 Score: Đo độ overlap giữa predicted và target supporting facts")
+    print(f"   • EM Score: Exact Match - chỉ = 1.0 khi prediction khớp hoàn toàn")
+    print(f"   • Loss: CrossEntropy + Focal Loss để xử lý class imbalance")
+    if best_em == 0.0:
+        print(f"   • EM=0 là BÌNH THƯỜNG ở early training - model học partial patterns trước!")
 
 if __name__ == "__main__":
     main()
