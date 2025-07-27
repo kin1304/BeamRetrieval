@@ -65,25 +65,18 @@ class DatasetLoader:
         
         for item in data:
             if 'question' in item and 'context' in item:
-                # Xử lý context từ format HotpotQA
-                contexts = []
-                for title, sentences in item['context']:
-                    # Ghép các câu thành đoạn văn
-                    paragraph = ' '.join(sentences)
-                    contexts.append({
-                        'title': title,
-                        'text': paragraph
-                    })
+                # 🚀 GIỮ NGUYÊN format HotpotQA gốc: [title, [sentences]]
+                # Không convert thành {'title': str, 'text': str}
+                contexts = item['context']  # Giữ nguyên [[title, [sentences]], ...]
                 
                 processed_item = {
                     'id': item.get('_id', f"hotpot_{len(processed_data)}"),
                     'question': item['question'],
                     'answer': item.get('answer', ''),
-                    'contexts': contexts,
+                    'contexts': contexts,  # Format gốc: [[title, [sentences]], ...]
                     'type': item.get('type', 'bridge'),
                     'level': item.get('level', 'medium'),
                     'dataset': 'hotpotqa',
-                    # Preserve original fields including supporting_facts
                     'supporting_facts': item.get('supporting_facts', []),
                     'original': item  # Keep full original data for reference
                 }

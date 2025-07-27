@@ -243,7 +243,7 @@ def main():
     
     # Tạo dataset và dataloader
     max_seq_len = config.get('max_seq_len', 512)
-    dataset = RetrievalDataset(test_data, model.tokenizer, max_len=max_seq_len, num_contexts=5)
+    dataset = RetrievalDataset(test_data, model.tokenizer, max_len=max_seq_len)  # 🆕 Bỏ num_contexts
     
     dataloader = DataLoader(
         dataset,
