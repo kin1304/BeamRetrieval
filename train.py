@@ -1,16 +1,7 @@
 #!/usr/bin/env python3
 """
 Script Training Chính cho Advanced Multi-Hop Retriever
-Cách dùng: python tra                # Thêm nội dung còn lại
-                if current_paragraph.strip():
-                    paragraphs.append(current_paragraph.strip())
-        
-        # Lọc bỏ đoạn văn rỗng và đảm bảo nội dung tối thiểu
-        paragraphs = [p for p in paragraphs if len(p.strip()) > 10]
-        
-        # Đảm bảo ít nhất một đoạn văn
-        if not paragraphs:
-            paragraphs = [context_text[:max_len] if context_text else "Không có nội dung."]ataset train/dev] [--samples N] [--epochs N] [--batch_size N] [--gpu]
+Cách dùng: python train.py [--dataset train/dev] [--samples N] [--epochs N] [--batch_size N] [--gpu]
 """
 import argparse
 import sys
@@ -68,60 +59,33 @@ def calculate_f1_em(predictions, targets):
 class RetrievalDataset(Dataset):
     """Dataset cho training multi-hop retrieval"""
     
-    def __init__(self, data, tokenizer, max_len=256, num_contexts=5):
+    def __init__(self, data, tokenizer, max_len=256):
         self.data = data
         self.tokenizer = tokenizer
         self.max_len = max_len
-        self.num_contexts = num_contexts
         
     def __len__(self):
         return len(self.data)
     
-    def _split_context_to_paragraphs(self, context_text, max_len=200):
+    def _split_context_to_paragraphs(self, context_item):
         """
-        🚀 TỐI ƯU: Chia context thành đoạn văn trực tiếp từ raw text
-        Không có hiện tượng decode/re-tokenize kém hiệu quả!
+        🚀 TỐI ƯU: HotpotQA format: [title, [sentence1, sentence2, ...]]
+        Gộp title + tất cả sentences thành 1 paragraph lớn duy nhất
         """
-        paragraphs = []
+        title = context_item[0]        # Title của context
+        sentences = context_item[1]    # List các câu
         
-        # Bước 1: Chia theo double newlines (ngắt đoạn văn tự nhiên)
-        parts = context_text.split('\n\n')
+        # Gộp tất cả sentences thành 1 đoạn văn lớn
+        combined_text = ' '.join(sentence.strip() for sentence in sentences if sentence.strip())
         
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-                
-            if len(part) <= max_len:
-                paragraphs.append(part)
-            else:
-                # Bước 2: Chia các phần dài theo câu
-                sentences = part.split('. ')
-                current_paragraph = ""
-                
-                for sentence in sentences:
-                    # Kiểm tra việc thêm câu này có vượt quá max_len không
-                    test_paragraph = current_paragraph + sentence + ". " if current_paragraph else sentence + ". "
-                    
-                    if len(test_paragraph) > max_len and current_paragraph:
-                        # Lưu đoạn văn hiện tại và bắt đầu đoạn mới
-                        paragraphs.append(current_paragraph.strip())
-                        current_paragraph = sentence + ". "
-                    else:
-                        current_paragraph = test_paragraph
-                
-                # Thêm nội dung còn lại
-                if current_paragraph.strip():
-                    paragraphs.append(current_paragraph.strip())
+        # Tạo paragraph hoàn chỉnh: Title + Combined text
+        if combined_text:
+            paragraph = f"{title}. {combined_text}"
+        else:
+            paragraph = f"{title}. No content available."
         
-        # Filter out empty paragraphs and ensure minimum content
-        paragraphs = [p for p in paragraphs if len(p.strip()) > 10]
-        
-        # Ensure at least one paragraph
-        if not paragraphs:
-            paragraphs = [context_text[:max_len] if context_text else "No content available."]
-        
-        return paragraphs
+        # Return list với 1 paragraph duy nhất
+        return [paragraph]
     
     def __getitem__(self, idx):
         item = self.data[idx]
@@ -129,22 +93,9 @@ class RetrievalDataset(Dataset):
         contexts = item['contexts']
         supporting_facts = item.get('supporting_facts', [])
         
-        # Chọn contexts
-        if len(contexts) > self.num_contexts:
-            sf_titles = {sf[0] for sf in supporting_facts}
-            sf_contexts = [ctx for ctx in contexts if ctx['title'] in sf_titles]
-            other_contexts = [ctx for ctx in contexts if ctx['title'] not in sf_titles]
-            
-            selected_contexts = sf_contexts[:2]
-            remaining = self.num_contexts - len(selected_contexts)
-            if remaining > 0 and other_contexts:
-                selected_contexts.extend(random.sample(other_contexts, min(remaining, len(other_contexts))))
-        else:
-            selected_contexts = contexts
-        
-        # Đệm contexts nếu cần
-        while len(selected_contexts) < self.num_contexts:
-            selected_contexts.append({'title': 'Empty', 'text': 'Không có context.'})
+        # 🆕 SỬ DỤNG TẤT CẢ CONTEXTS - không giới hạn
+        selected_contexts = contexts  # Sử dụng tất cả contexts có sẵn
+        num_contexts = len(selected_contexts)  # Dynamic cho mỗi sample
         
         # 🚀 TỐI ƯU: Chia đoạn văn TRƯỚC khi tokenization (không decode/re-tokenize!)
         q_tokens_list = []
@@ -169,13 +120,12 @@ class RetrievalDataset(Dataset):
             question_tokens = torch.cat([question_tokens, torch.full((padding_len,), self.tokenizer.pad_token_id)])
         
         # Xử lý từng context và chia thành đoạn văn
-        for ctx_idx, ctx in enumerate(selected_contexts[:self.num_contexts]):
-            ctx_text = f"{ctx['title']}: {ctx['text']}"
+        for ctx_idx, ctx in enumerate(selected_contexts):  # 🆕 Sử dụng tất cả selected_contexts
+            # HotpotQA format: ctx = [title, [sentences]]
+            # Không cần gộp title + text, xử lý trực tiếp!
+            paragraphs = self._split_context_to_paragraphs(ctx)
             
-            # Chia context thành đoạn văn TRƯỚC tokenization (không mất thông tin!)
-            paragraphs = self._split_context_to_paragraphs(ctx_text)
-            
-            # Tokenize từng đoạn văn trực tiếp: [CLS] + Q + P + [SEP]
+            # Tokenize từng paragraph: [CLS] + Q + P + [SEP]
             for paragraph_text in paragraphs:
                 combined_text = question + " " + paragraph_text
                 para_tokens = self.tokenizer(
@@ -194,8 +144,8 @@ class RetrievalDataset(Dataset):
         
         # Chỉ số supporting facts (ánh xạ tới chỉ số context gốc)
         sf_indices = []
-        for i, ctx in enumerate(selected_contexts[:self.num_contexts]):
-            if any(ctx['title'] == sf[0] for sf in supporting_facts):
+        for i, ctx in enumerate(selected_contexts):  # 🆕 Dùng tất cả selected_contexts
+            if any(ctx[0] == sf[0] for sf in supporting_facts):  # ctx[0] = title
                 sf_indices.append(i)
         
         # Đảm bảo ít nhất 1 supporting fact
@@ -203,9 +153,9 @@ class RetrievalDataset(Dataset):
             sf_indices.append(0)
         sf_indices = sf_indices[:3]  # Tối đa 3 supporting facts
         
-        # Đệm để đảm bảo độ dài nhất quán
-        while len(sf_indices) < 2:
-            sf_indices.append(sf_indices[0])
+        # 🆕 KHÔNG ĐỆM - để dynamic length
+        # while len(sf_indices) < 2:
+        #     sf_indices.append(sf_indices[0])
         
         return {
             'q_codes': q_tokens_list,  # Token câu hỏi sạch đơn (không có [CLS], [SEP])
@@ -392,6 +342,18 @@ def main():
     # Tải dữ liệu
     train_data = load_hotpot_data(args.dataset, sample_size=args.samples)
     
+    # 🆕 THỐNG KÊ CONTEXTS - chỉ để thông tin, không giới hạn
+    if train_data:
+        context_lengths = [len(item['contexts']) for item in train_data if 'contexts' in item]
+        if context_lengths:
+            print(f"📊 Dataset có {len(context_lengths)} items")
+            print(f"📊 Context lengths: min={min(context_lengths)}, max={max(context_lengths)}, avg={sum(context_lengths)/len(context_lengths):.1f}")
+            print(f"✨ Sử dụng ALL contexts cho mỗi sample (dynamic)")
+        else:
+            print(f"⚠️  No context data found")
+    else:
+        print(f"⚠️  No training data loaded")
+    
     print(f"Training trên {len(train_data)} {args.dataset.upper()} samples")
     print(f"Epochs: {args.epochs}, Batch size: {args.batch_size}, LR: {args.learning_rate}")
     print(f"Model sẽ lưu tại: {args.save_path}")
@@ -418,7 +380,7 @@ def main():
     print("\n📦 Đang tạo dataset...")
     tokenizer = model.tokenizer
 
-    dataset = RetrievalDataset(train_data, tokenizer, max_len=args.max_len, num_contexts=5)
+    dataset = RetrievalDataset(train_data, tokenizer, max_len=args.max_len)  # 🆕 Bỏ num_contexts
     
     # Pin memory để chuyển GPU nhanh hơn
     pin_memory = torch.cuda.is_available()
