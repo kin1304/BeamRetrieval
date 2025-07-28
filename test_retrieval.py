@@ -73,12 +73,11 @@ def evaluate_model(model, dataloader, device, max_batches=None, has_labels=True)
                     # Di chuyển dữ liệu lên device
                     q_codes = [q.to(device, non_blocking=True) for q in batch['q_codes'][i]]
                     p_codes = [p.to(device, non_blocking=True) for p in batch['p_codes'][i]]
-                    context_mapping = batch['context_mapping'][i]
                     sf_idx = [s.to(device, non_blocking=True) for s in batch['sf_idx'][i]]
                     hop = batch['hops'][i]
                     
-                    # Forward pass
-                    outputs = model(q_codes, p_codes, sf_idx, hop, context_mapping=context_mapping)
+                    # Forward pass - paragraph-only system
+                    outputs = model(q_codes, p_codes, sf_idx, hop)
                     
                     # 🆕 SỬ DỤNG PARAGRAPH_PREDS CHO EVALUATION
                     predictions = []

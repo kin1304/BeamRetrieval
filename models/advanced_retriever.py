@@ -367,21 +367,20 @@ class Retriever(nn.Module):
         hop_projection = self.hop_n_classifier_layer(hop_encoder_outputs)
         return hop_projection
 
-    def forward(self, q_codes, p_codes, sf_idx, hop=0, context_mapping=None):
+    def forward(self, q_codes, p_codes, sf_idx, hop=0):
         """
-        🚀 TỐI ƯU: Forward pass với đoạn văn đã chia sẵn (không decode/re-tokenize!)
+        🚀 TỐI ƯU: Forward pass với đoạn văn đã chia sẵn (paragraph-only system)
         
         Pipeline:
         1. Sử dụng chuỗi đoạn văn đã chia sẵn trực tiếp từ data loader
         2. Áp dụng multi-hop reasoning với concatenation phù hợp
-        3. Chuyển đổi dự đoán đoạn văn ngược về dự đoán context
+        3. Dự đoán trực tiếp trên paragraph indices
         
         Args:
             q_codes: List chứa token câu hỏi sạch (không có [CLS], [SEP])
             p_codes: List các chuỗi đoạn văn [CLS] + Q + P + [SEP] (đã pre-tokenized)
-            sf_idx: Chỉ số supporting fact (cấp context)
+            sf_idx: Chỉ số supporting fact (paragraph indices)
             hop: Số hops cho inference mode
-            context_mapping: List ánh xạ chỉ số đoạn văn → chỉ số context gốc
         """
         device = q_codes[0].device
         total_loss = torch.tensor(0.0, device=device, requires_grad=True)
@@ -389,10 +388,9 @@ class Retriever(nn.Module):
         # Khởi tạo biến
         loss_function = nn.CrossEntropyLoss()
         
-        # 🚀 TỐI ƯU: Sử dụng đoạn văn đã chia sẵn trực tiếp (không trích xuất context!)
+        # 🚀 TỐI ƯU: Sử dụng đoạn văn đã chia sẵn trực tiếp
         question_tokens = q_codes[0]  # Token câu hỏi sạch
         all_paragraph_sequences = p_codes  # Đoạn văn đã tokenized!
-        context_to_paragraph_mapping = context_mapping if context_mapping else list(range(len(p_codes)))
         focal_loss_function = None
         
         if self.use_focal:
@@ -437,9 +435,9 @@ class Retriever(nn.Module):
                     hop1_qp_attention_mask[i, :seq_len] = (paragraph_seq != self.tokenizer.pad_token_id).long()
                     
                     if self.training:
-                        # Kiểm tra xem đoạn văn này có thuộc supporting context không
-                        original_ctx_idx = context_to_paragraph_mapping[i]
-                        if original_ctx_idx in sf_idx:
+                        # Kiểm tra xem đoạn văn này có thuộc supporting facts không
+                        # sf_idx đã là paragraph indices
+                        if i in sf_idx:
                             hop1_label[i] = 1
                 
                 # Forward pass cho hop đầu tiên
@@ -493,12 +491,12 @@ class Retriever(nn.Module):
                         # Nhãn cho training
                         if self.training:
                             new_pred_set = set(current_preds[beam_idx] + [para_idx])
-                            target_contexts = set()
-                            for p_idx in new_pred_set:
-                                target_contexts.add(context_to_paragraph_mapping[p_idx])
+                            
+                            # sf_idx đã là paragraph indices, so sánh trực tiếp
+                            target_paragraphs = set(sf_idx[:hop_idx+1])
                             
                             # Kiểm tra xem tổ hợp này có khớp với supporting facts mục tiêu không
-                            if target_contexts == set(sf_idx[:hop_idx+1]):
+                            if new_pred_set == target_paragraphs:
                                 next_labels.append(1)
                             else:
                                 next_labels.append(0)

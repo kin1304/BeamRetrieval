@@ -100,7 +100,6 @@ class RetrievalDataset(Dataset):
         # 🚀 TỐI ƯU: Chia đoạn văn TRƯỚC khi tokenization (không decode/re-tokenize!)
         q_tokens_list = []
         p_tokens_list = []  # Mới: chuỗi đoạn văn trực tiếp
-        context_to_paragraph_mapping = []  # Ánh xạ chỉ số đoạn văn tới chỉ số context gốc
         
         # Tokenize câu hỏi một lần (token sạch không có special tokens)
         question_tokens = self.tokenizer(
@@ -120,13 +119,18 @@ class RetrievalDataset(Dataset):
             question_tokens = torch.cat([question_tokens, torch.full((padding_len,), self.tokenizer.pad_token_id)])
         
         # Xử lý từng context và chia thành đoạn văn
+        paragraph_to_context_map = {}  # Map paragraph index -> (context_idx, paragraph text, title)
+        
         for ctx_idx, ctx in enumerate(selected_contexts):  # 🆕 Sử dụng tất cả selected_contexts
             # HotpotQA format: ctx = [title, [sentences]]
-            # Không cần gộp title + text, xử lý trực tiếp!
+            title = ctx[0]
             paragraphs = self._split_context_to_paragraphs(ctx)
             
             # Tokenize từng paragraph: [CLS] + Q + P + [SEP]
             for paragraph_text in paragraphs:
+                paragraph_idx = len(p_tokens_list)  # Current index trong p_tokens_list
+                paragraph_to_context_map[paragraph_idx] = (ctx_idx, paragraph_text, title)
+                
                 combined_text = question + " " + paragraph_text
                 para_tokens = self.tokenizer(
                     combined_text,
@@ -137,29 +141,20 @@ class RetrievalDataset(Dataset):
                 )['input_ids'].view(-1)
                 
                 p_tokens_list.append(para_tokens)
-                context_to_paragraph_mapping.append(ctx_idx)
         
         # Lưu question tokens một lần (dùng lại cho tất cả đoạn văn)
         q_tokens_list.append(question_tokens)
         
         # 🆕 XỬ LÝ SUPPORTING FACTS → PARAGRAPH INDICES
-        # Convert supporting facts to paragraph indices thay vì context indices
         sf_paragraph_indices = []
         
-        # Build mapping from (title, sentence_idx) to paragraph index
-        paragraph_idx = 0
-        for ctx_idx, ctx in enumerate(selected_contexts):
-            title = ctx[0]
-            sentences = ctx[1]
-            
-            # Mỗi context chỉ tạo 1 paragraph duy nhất, nên check title match
-            for sf in supporting_facts:
-                sf_title = sf[0]
+        # Map supporting facts to paragraph indices dựa trên title matching
+        for sf in supporting_facts:
+            sf_title = sf[0]
+            for paragraph_idx, (ctx_idx, paragraph_text, title) in paragraph_to_context_map.items():
                 if title == sf_title:
                     sf_paragraph_indices.append(paragraph_idx)
-                    break  # Chỉ add một lần cho mỗi context
-            
-            paragraph_idx += 1  # Mỗi context = 1 paragraph
+                    break  # Chỉ add paragraph đầu tiên của context có title khớp
         
         # Đảm bảo ít nhất 1 supporting fact paragraph
         if not sf_paragraph_indices:
@@ -176,7 +171,6 @@ class RetrievalDataset(Dataset):
         return {
             'q_codes': q_tokens_list,  # Token câu hỏi sạch đơn (không có [CLS], [SEP])
             'p_codes': p_tokens_list,  # MỚI: Chuỗi đoạn văn trực tiếp [CLS] + Q + P + [SEP]
-            'context_mapping': context_to_paragraph_mapping,  # MỚI: Ánh xạ Đoạn văn → Context
             'sf_idx': [torch.tensor(sf_paragraph_indices, dtype=torch.long)],  # 🆕 PARAGRAPH INDICES
             'hop': len(sf_paragraph_indices)
         }
@@ -186,7 +180,6 @@ def collate_fn(batch):
     return {
         'q_codes': [item['q_codes'] for item in batch],
         'p_codes': [item['p_codes'] for item in batch],  # MỚI: Chuỗi đoạn văn
-        'context_mapping': [item['context_mapping'] for item in batch],  # MỚI: Ánh xạ Đoạn văn → Context
         'sf_idx': [item['sf_idx'] for item in batch],
         'hops': [item['hop'] for item in batch]
     }
@@ -218,7 +211,6 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
                 # 🚀 TỐI ƯU: Di chuyển dữ liệu lên device hiệu quả (định dạng mới)
                 q_codes = [q.to(device, non_blocking=True) for q in batch['q_codes'][i]]
                 p_codes = [p.to(device, non_blocking=True) for p in batch['p_codes'][i]]  # MỚI: Chuỗi đoạn văn
-                context_mapping = batch['context_mapping'][i]  # MỚI: Thông tin ánh xạ
                 sf_idx = [s.to(device, non_blocking=True) for s in batch['sf_idx'][i]]
                 hop = batch['hops'][i]
                 
@@ -226,11 +218,11 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
                 if scaler is not None:
 
                     with torch.cuda.amp.autocast('cuda'):
-                        # 🚀 TỐI ƯU: Sử dụng p_codes (chuỗi đoạn văn) và context_mapping
-                        outputs = model(q_codes, p_codes, sf_idx, hop, context_mapping=context_mapping)
+                        # 🚀 TỐI ƯU: Sử dụng p_codes (chuỗi đoạn văn) - paragraph-only system
+                        outputs = model(q_codes, p_codes, sf_idx, hop)
                         loss = outputs['loss']
                 else:
-                    outputs = model(q_codes, p_codes, sf_idx, hop, context_mapping=context_mapping)
+                    outputs = model(q_codes, p_codes, sf_idx, hop)
                     loss = outputs['loss']
                 
                 if loss.requires_grad and not torch.isnan(loss):
