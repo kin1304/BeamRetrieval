@@ -555,21 +555,9 @@ class Retriever(nn.Module):
                 current_preds = new_current_preds
                 selected_paragraph_tokens = new_selected_paragraph_tokens
         
-        # Chuyển đổi dự đoán đoạn văn ngược về dự đoán context
-        final_context_preds = []
-        for beam_paragraphs in current_preds:
-            context_indices = []
-            for para_idx in beam_paragraphs:
-                ctx_idx = context_to_paragraph_mapping[para_idx]
-                if ctx_idx not in context_indices:
-                    context_indices.append(ctx_idx)
-            final_context_preds.append(context_indices)
-        
-        # Trả về kết quả
+        # 🆕 CHỈ TRẢ VỀ PARAGRAPH_PREDS - SIMPLIFIED APPROACH
         return {
-            'current_preds': final_context_preds,
-            'final_preds': final_context_preds,
-            'paragraph_preds': current_preds,  # Cũng trả về dự đoán cấp đoạn văn
+            'paragraph_preds': current_preds,  # Main output (paragraph level only)
             'loss': total_loss
         }
     

@@ -142,16 +142,32 @@ class RetrievalDataset(Dataset):
         # Lưu question tokens một lần (dùng lại cho tất cả đoạn văn)
         q_tokens_list.append(question_tokens)
         
-        # Chỉ số supporting facts (ánh xạ tới chỉ số context gốc)
-        sf_indices = []
-        for i, ctx in enumerate(selected_contexts):  # 🆕 Dùng tất cả selected_contexts
-            if any(ctx[0] == sf[0] for sf in supporting_facts):  # ctx[0] = title
-                sf_indices.append(i)
+        # 🆕 XỬ LÝ SUPPORTING FACTS → PARAGRAPH INDICES
+        # Convert supporting facts to paragraph indices thay vì context indices
+        sf_paragraph_indices = []
         
-        # Đảm bảo ít nhất 1 supporting fact
-        if not sf_indices:
-            sf_indices.append(0)
-        sf_indices = sf_indices[:3]  # Tối đa 3 supporting facts
+        # Build mapping from (title, sentence_idx) to paragraph index
+        paragraph_idx = 0
+        for ctx_idx, ctx in enumerate(selected_contexts):
+            title = ctx[0]
+            sentences = ctx[1]
+            
+            # Mỗi context chỉ tạo 1 paragraph duy nhất, nên check title match
+            for sf in supporting_facts:
+                sf_title = sf[0]
+                if title == sf_title:
+                    sf_paragraph_indices.append(paragraph_idx)
+                    break  # Chỉ add một lần cho mỗi context
+            
+            paragraph_idx += 1  # Mỗi context = 1 paragraph
+        
+        # Đảm bảo ít nhất 1 supporting fact paragraph
+        if not sf_paragraph_indices:
+            sf_paragraph_indices.append(0)
+        
+        # Remove duplicates và sort
+        sf_paragraph_indices = sorted(list(set(sf_paragraph_indices)))
+        sf_paragraph_indices = sf_paragraph_indices[:3]  # Tối đa 3 supporting paragraphs
         
         # 🆕 KHÔNG ĐỆM - để dynamic length
         # while len(sf_indices) < 2:
@@ -161,8 +177,8 @@ class RetrievalDataset(Dataset):
             'q_codes': q_tokens_list,  # Token câu hỏi sạch đơn (không có [CLS], [SEP])
             'p_codes': p_tokens_list,  # MỚI: Chuỗi đoạn văn trực tiếp [CLS] + Q + P + [SEP]
             'context_mapping': context_to_paragraph_mapping,  # MỚI: Ánh xạ Đoạn văn → Context
-            'sf_idx': [torch.tensor(sf_indices, dtype=torch.long)],
-            'hop': len(sf_indices)
+            'sf_idx': [torch.tensor(sf_paragraph_indices, dtype=torch.long)],  # 🆕 PARAGRAPH INDICES
+            'hop': len(sf_paragraph_indices)
         }
 
 def collate_fn(batch):
@@ -230,17 +246,13 @@ def train_epoch(model, dataloader, optimizer, device, max_batches=None, scaler=N
                     valid_samples += 1
                     epoch_losses.append(loss.item())
                     
-                    # Tính toán F1 và EM chỉ sau khi TẤT CẢ hops đã hoàn thành
+                    # 🆕 SỬ DỤNG PARAGRAPH_PREDS CHO EVALUATION
                     predictions = []
-                    targets = sf_idx[0].cpu().tolist()
+                    targets = sf_idx[0].cpu().tolist()  # Paragraph indices targets
                     
-                    if 'final_preds' in outputs and outputs['final_preds']:
-                        # Sử dụng final predictions sau khi tất cả hops hoàn thành
-                        predictions = outputs['final_preds'][0] if len(outputs['final_preds']) > 0 else []
-                        
-                    elif 'current_preds' in outputs and outputs['current_preds']:
-                        # Fallback tới current predictions nếu final không có
-                        predictions = outputs['current_preds'][0] if len(outputs['current_preds']) > 0 else []
+                    if 'paragraph_preds' in outputs and outputs['paragraph_preds']:
+                        # Sử dụng paragraph predictions trực tiếp
+                        predictions = outputs['paragraph_preds'][0] if len(outputs['paragraph_preds']) > 0 else []
                     
                     # Luôn tính F1/EM kể cả khi predictions rỗng (để debug)
                     f1, em = calculate_f1_em(predictions, targets)

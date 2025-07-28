@@ -80,20 +80,18 @@ def evaluate_model(model, dataloader, device, max_batches=None, has_labels=True)
                     # Forward pass
                     outputs = model(q_codes, p_codes, sf_idx, hop, context_mapping=context_mapping)
                     
-                    # Lấy predictions
+                    # 🆕 SỬ DỤNG PARAGRAPH_PREDS CHO EVALUATION
                     predictions = []
                     
-                    if 'final_preds' in outputs and outputs['final_preds']:
-                        predictions = outputs['final_preds'][0] if len(outputs['final_preds']) > 0 else []
-                    elif 'current_preds' in outputs and outputs['current_preds']:
-                        predictions = outputs['current_preds'][0] if len(outputs['current_preds']) > 0 else []
+                    if 'paragraph_preds' in outputs and outputs['paragraph_preds']:
+                        predictions = outputs['paragraph_preds'][0] if len(outputs['paragraph_preds']) > 0 else []
                     
                     # Chỉ tính F1/EM nếu có labels
                     f1, em = 0.0, 0.0
                     targets = []
                     
                     if has_labels:
-                        targets = sf_idx[0].cpu().tolist()
+                        targets = sf_idx[0].cpu().tolist()  # Paragraph indices targets
                         f1, em = calculate_f1_em(predictions, targets)
                         all_f1_scores.append(f1)
                         all_em_scores.append(em)
